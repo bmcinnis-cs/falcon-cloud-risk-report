@@ -42,8 +42,8 @@ def sanitize(text):
         return ""
     replacements = {
         "—": "--", "–": "-", "‒": "-",
-        "'": "'",  "'": "'", """: '"', """: '"',
-        "•": "*",  "…": "...", " ": " ",
+        "‘": "'",  "’": "'", "“": '"', "”": '"',
+        "•": "*",  "…": "...", " ": " ",
     }
     for char, sub in replacements.items():
         text = text.replace(char, sub)
@@ -225,10 +225,10 @@ class FalconReport(FPDF):
         if self.page_no() == 1:
             return
         self.set_fill_color(*DARK)
-        self.rect(0, 0, 210, 18, "F")
+        self.rect(0, 0, 210, 20, "F")
         self.set_font("Helvetica", "B", 9)
         self.set_text_color(*CS_RED)
-        self.set_y(5)
+        self.set_y(6)
         self.cell(0, 8, "CROWDSTRIKE FALCON CLOUD SECURITY", align="C")
         self.set_y(self.t_margin)
 
@@ -288,6 +288,9 @@ class FalconReport(FPDF):
         self.ln(3)
 
     def sub_header(self, title):
+        # Keep sub-header pinned to at least one following content row
+        if self.get_y() > self.h - self.b_margin - 20:
+            self.add_page()
         self.set_fill_color(*DARK)
         self.rect(self.l_margin, self.get_y(), self.epw, 8, "F")
         self.set_font("Helvetica", "B", 9)
@@ -298,9 +301,19 @@ class FalconReport(FPDF):
         self.ln(3)
 
     def row(self, field, value, alt=False):
+        text = sanitize(str(value or "N/A"))
+        # Estimate height: use average char width to guess line count
+        self.set_font("Helvetica", "", 8)
+        col_w = self.epw - self.LABEL_W
+        char_w = self.get_string_width("m") or 2.5
+        chars_per_line = max(1, int(col_w / char_w))
+        n_lines = max(1, -(-len(text) // chars_per_line))  # ceiling division
+        row_h = n_lines * 6 + 2
+        if self.get_y() + row_h > self.h - self.b_margin:
+            self.add_page()
+
         fill_color = SECTION_BG if alt else WHITE
         self.set_fill_color(*fill_color)
-        text = sanitize(str(value or "N/A"))
         row_y = self.get_y()
 
         self.set_font("Helvetica", "B", 8)
@@ -315,7 +328,23 @@ class FalconReport(FPDF):
         self.multi_cell(self.epw - self.LABEL_W, 6, text, fill=True,
                         new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
+    def _separator(self):
+        # Guard against orphaned separator line at top of a new page
+        if self.get_y() + 10 > self.h - self.b_margin:
+            self.add_page()
+        self.set_draw_color(*LIGHT_GRAY)
+        self.line(self.l_margin, self.get_y(), self.l_margin + self.epw, self.get_y())
+        self.ln(8)
+
     def risk_card(self, i, total, risk):
+        # Estimate card height before rendering to avoid mid-card page breaks
+        risk_factors = risk.get("risk_factors") or risk.get("risk_factor") or []
+        n_rem = sum(len(f.get("remediation") or []) for f in risk_factors)
+        # title(10) + ln(1) + 10 fields*6 + ln(3) + separator+ln(8) ≈ 92 mm base
+        min_h = 92 + len(risk_factors) * 11 + n_rem * 12
+        if self.get_y() > self.h - self.b_margin - min_h:
+            self.add_page()
+
         self.set_fill_color(*DARK)
         self.rect(self.l_margin, self.get_y(), self.epw, 10, "F")
         self.set_font("Helvetica", "B", 9)
@@ -341,7 +370,6 @@ class FalconReport(FPDF):
             self.row(field, value, alt=idx % 2 == 0)
         self.ln(3)
 
-        risk_factors = risk.get("risk_factors") or risk.get("risk_factor") or []
         if risk_factors:
             self.sub_header("Risk Factors")
             for factor in risk_factors:
@@ -364,11 +392,13 @@ class FalconReport(FPDF):
                                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
                     self.ln(1)
 
-        self.set_draw_color(*LIGHT_GRAY)
-        self.line(self.l_margin, self.get_y(), self.l_margin + self.epw, self.get_y())
-        self.ln(8)
+        self._separator()
 
     def ioa_card(self, i, total, ioa):
+        # 12 fields × 6 mm + title(10) + ln(1) + ln(3) + separator+ln(8) ≈ 105 mm
+        if self.get_y() > self.h - self.b_margin - 105:
+            self.add_page()
+
         self.set_fill_color(*DARK)
         self.rect(self.l_margin, self.get_y(), self.epw, 10, "F")
         self.set_font("Helvetica", "B", 9)
@@ -385,8 +415,9 @@ class FalconReport(FPDF):
         tactic_str = f"{tactic} ({tactic_id})" if tactic_id else tactic
         technique_str = f"{technique} ({technique_id})" if technique_id else technique
 
+        desc = ioa.get("description") or ""
         fields = [
-            ("Description",  ioa.get("description")),
+            ("Description",  desc[:300] + ("..." if len(desc) > 300 else "")),
             ("Severity",     ioa.get("severity_name")),
             ("Provider",     (ioa.get("cloud_provider") or "").upper()),
             ("Account",      ioa.get("cloud_account_id")),
@@ -403,9 +434,7 @@ class FalconReport(FPDF):
             self.row(field, value, alt=idx % 2 == 0)
         self.ln(3)
 
-        self.set_draw_color(*LIGHT_GRAY)
-        self.line(self.l_margin, self.get_y(), self.l_margin + self.epw, self.get_y())
-        self.ln(8)
+        self._separator()
 
     def vm_table(self, assets):
         if not assets:
@@ -415,21 +444,30 @@ class FalconReport(FPDF):
             self.ln(2)
             return
 
-        self.set_fill_color(*DARK)
-        self.set_font("Helvetica", "B", 8)
-        self.set_text_color(*WHITE)
-        self.set_x(self.l_margin)
         col_w = self.epw / 2
-        self.cell(col_w, 7, "  Resource ID", fill=True)
-        self.cell(col_w, 7, "  Account ID", fill=True,
-                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+        def _table_header():
+            self.set_fill_color(*DARK)
+            self.set_font("Helvetica", "B", 8)
+            self.set_text_color(*WHITE)
+            self.set_x(self.l_margin)
+            self.cell(col_w, 7, "  Resource ID", fill=True)
+            self.cell(col_w, 7, "  Account ID", fill=True,
+                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+        _table_header()
 
         for idx, asset in enumerate(assets):
+            if self.get_y() + 6.5 > self.h - self.b_margin:
+                self.add_page()
+                _table_header()
+            rid = asset.get("resource_id", "N/A")
+            rid_display = rid if len(rid) <= 45 else rid[:42] + "..."
             self.set_fill_color(*(SECTION_BG if idx % 2 == 0 else WHITE))
             self.set_font("Helvetica", "", 7.5)
             self.set_text_color(*DARK)
             self.set_x(self.l_margin)
-            self.cell(col_w, 6.5, f"  {asset.get('resource_id', 'N/A')}", fill=True)
+            self.cell(col_w, 6.5, f"  {rid_display}", fill=True)
             self.cell(col_w, 6.5, f"  {asset.get('account_id', 'N/A')}", fill=True,
                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
@@ -440,7 +478,7 @@ def build_pdf(risks, ioas, vm_data):
     vm_totals = {provider: len(assets) for provider, assets in vm_data.items()}
 
     pdf = FalconReport(orientation="P", unit="mm", format="A4")
-    pdf.set_margins(10, 26, 10)
+    pdf.set_margins(10, 22, 10)
     pdf.set_auto_page_break(auto=True, margin=20)
 
     # Cover
@@ -457,8 +495,6 @@ def build_pdf(risks, ioas, vm_data):
                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     else:
         for i, risk in enumerate(risks, 1):
-            if pdf.get_y() > pdf.h - pdf.b_margin - 40:
-                pdf.add_page()
             pdf.risk_card(i, len(risks), risk)
 
     # Cloud IOAs section
@@ -471,8 +507,6 @@ def build_pdf(risks, ioas, vm_data):
                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     else:
         for i, ioa in enumerate(ioas, 1):
-            if pdf.get_y() > pdf.h - pdf.b_margin - 40:
-                pdf.add_page()
             pdf.ioa_card(i, len(ioas), ioa)
 
     # Unmanaged VMs section
@@ -494,8 +528,8 @@ if __name__ == "__main__":
         client_secret=os.environ["FALCON_CLIENT_SECRET"],
         base_url=os.environ.get("FALCON_BASE_URL", "https://api.crowdstrike.com"),
     )
-    cs    = CloudSecurity(auth_object=auth)
-    csa   = CloudSecurityAssets(auth_object=auth)
+    cs     = CloudSecurity(auth_object=auth)
+    csa    = CloudSecurityAssets(auth_object=auth)
     alerts = Alerts(auth_object=auth)
 
     print(f"\n{T_DIM}Fetching risks:  {RISKS_FILTER}{T_RESET}")
