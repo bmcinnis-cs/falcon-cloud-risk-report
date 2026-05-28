@@ -337,12 +337,8 @@ class FalconReport(FPDF):
         self.ln(8)
 
     def risk_card(self, i, total, risk):
-        # Estimate card height before rendering to avoid mid-card page breaks
-        risk_factors = risk.get("risk_factors") or risk.get("risk_factor") or []
-        n_rem = sum(len(f.get("remediation") or []) for f in risk_factors)
-        # title(10) + ln(1) + 10 fields*6 + ln(3) + separator+ln(8) ≈ 92 mm base
-        min_h = 92 + len(risk_factors) * 11 + n_rem * 12
-        if self.get_y() > self.h - self.b_margin - min_h:
+        # Guard for card header + 10 core field rows (title 10 + ln1 + 10×6 + ln3 ≈ 80 mm)
+        if self.get_y() > self.h - self.b_margin - 80:
             self.add_page()
 
         self.set_fill_color(*DARK)
@@ -370,9 +366,13 @@ class FalconReport(FPDF):
             self.row(field, value, alt=idx % 2 == 0)
         self.ln(3)
 
+        risk_factors = risk.get("risk_factors") or risk.get("risk_factor") or []
         if risk_factors:
             self.sub_header("Risk Factors")
             for factor in risk_factors:
+                # Guard: factor name bar + at least one remediation title
+                if self.get_y() > self.h - self.b_margin - 30:
+                    self.add_page()
                 self.set_fill_color(*LIGHT_GRAY)
                 self.set_font("Helvetica", "B", 8)
                 self.set_text_color(*DARK)
@@ -380,6 +380,9 @@ class FalconReport(FPDF):
                 self.cell(self.epw, 7, sanitize(f"  {factor.get('insight_name', 'N/A')}"),
                           fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
                 for remediation in factor.get("remediation") or []:
+                    # Guard: remediation title + opening lines of content
+                    if self.get_y() > self.h - self.b_margin - 25:
+                        self.add_page()
                     self.set_font("Helvetica", "B", 8)
                     self.set_text_color(*AMBER)
                     self.set_x(self.l_margin + 4)
