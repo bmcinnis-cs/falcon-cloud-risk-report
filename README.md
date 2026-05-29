@@ -11,8 +11,8 @@ A single PDF with a cover page and up to three content sections — each togglab
 | Section | Content |
 |---|---|
 | **Cover page** | Active filter summary and counts for each included section |
-| **Cloud Risks** | One card per finding: rule name, description, asset, account, region, and risk factors with remediation steps |
-| **Cloud IOA Detections** | One card per detection: event name, description, severity, MITRE tactic/technique, user, region, and timestamp |
+| **Cloud Risks** | Rule name, description, asset, account, region, and risk factors with remediation steps |
+| **Cloud IOA Detections** |  Event name, description, severity, MITRE tactic/technique, user, region, and timestamp |
 | **Unmanaged Running VMs** | Table of unmanaged, running VMs scoped to your selected cloud providers |
 
 ---
