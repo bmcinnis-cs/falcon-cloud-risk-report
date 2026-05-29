@@ -334,8 +334,9 @@ def fetch_ai_critical_packages(sdk, severities):
 
 
 def fetch_ai_ioms(csd):
-    # query_iom_entities filter params are not reliably applied server-side —
-    # fetch all IOM entity IDs once and filter client-side by rule name keywords
+    # Server-side filter params (policy_id, status) are ignored by this endpoint —
+    # paginate all entity IDs using meta.next cursor (not meta.pagination.after),
+    # then filter client-side by non-compliant status and AI keyword rule name.
     entity_ids = []
     after = None
     while True:
@@ -348,8 +349,8 @@ def fetch_ai_ioms(csd):
             raise RuntimeError(f"query_iom_entities failed: {r['body'].get('errors')}")
         batch = r["body"].get("resources") or []
         entity_ids.extend(batch)
-        after = r["body"].get("meta", {}).get("pagination", {}).get("after")
-        dbg(f"  page: {len(batch)} ids, after={after!r}, total so far={len(entity_ids)}")
+        after = r["body"].get("meta", {}).get("next")  # cursor is meta.next, not meta.pagination.after
+        dbg(f"  page: {len(batch)} ids, next={'...' if after else None}, total so far={len(entity_ids)}")
         if not batch or not after:
             break
 
@@ -363,14 +364,16 @@ def fetch_ai_ioms(csd):
         if r2["status_code"] != 200:
             continue
         for e in r2["body"].get("resources") or []:
-            eval_rule = e.get("evaluation", {}).get("rule", {})
+            eval_data = e.get("evaluation", {})
+            if eval_data.get("status") != "non-compliant":
+                continue
+            eval_rule = eval_data.get("rule", {})
             rule_name = eval_rule.get("name", "")
             if not any(kw in rule_name.lower() for kw in AI_IOM_KEYWORDS):
                 continue
             cloud    = e.get("cloud", {})
             resource = e.get("resource", {})
-            sev_raw  = eval_rule.get("severity")
-            severity = SEVERITY_MAP.get(sev_raw, str(sev_raw)) if sev_raw is not None else "N/A"
+            severity = (eval_data.get("severity") or "").capitalize() or "N/A"
             result.append({
                 "resource_id":   resource.get("resource_id", "N/A"),
                 "resource_type": resource.get("resource_type_name") or resource.get("resource_type", "N/A"),
