@@ -601,7 +601,7 @@ def fetch_ioms(csd, categories, severities=None):
     after = None
     page_num = 0
     while True:
-        params = {"limit": 500, "filter": "resource_status:'Active'"}
+        params = {"limit": 500, "filter": "extension_status:'Unresolved'"}
         if after:
             params["after"] = after
         r = csd.query_iom_entities(**params)
