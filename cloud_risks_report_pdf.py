@@ -174,18 +174,21 @@ def interactive_config():
         sevs = [s.strip().capitalize() for s in sev_raw.split(",") if s.strip()]
         config["severities"] = [s for s in sevs if s in VALID_SEVERITIES] or ["High"]
 
-        status_raw = _prompt("Status (Open / Closed / all)", "Open")
+        print(f"  {T_GRAY}Available statuses: Open, Closed, all{T_RESET}")
+        status_raw = _prompt("Status", "Open")
         status_val = status_raw.strip().capitalize() if status_raw.strip() else "Open"
         config["status"] = status_val if status_val in ("Open", "Closed") else "all"
 
-        prov_raw = _prompt("Cloud provider (aws / azure / gcp / all)", "all")
+        print(f"  {T_GRAY}Available providers: {', '.join(VALID_PROVIDERS)}, all{T_RESET}")
+        prov_raw = _prompt("Cloud provider", "all")
         prov = prov_raw.strip().lower()
         config["risk_provider"] = prov if prov in VALID_PROVIDERS else "all"
         print()
 
     if config["include_ioas"]:
         print(f"  {T_BOLD}Cloud IOA Filters{T_RESET}")
-        ioa_sev_raw = _prompt("IOA severity filter (comma-separated, or all)", "all")
+        print(f"  {T_GRAY}Available severities: {', '.join(VALID_SEVERITIES)}, all{T_RESET}")
+        ioa_sev_raw = _prompt("IOA severity (comma-separated, or all)", "all")
         if not ioa_sev_raw.strip() or ioa_sev_raw.strip().lower() == "all":
             config["ioa_severities"] = []
         else:
@@ -195,7 +198,8 @@ def interactive_config():
 
     if config["include_ai_packages"]:
         print(f"  {T_BOLD}AI Package Filters{T_RESET}")
-        ai_sev_raw = _prompt("Package severity filter (comma-separated, or all)", "Critical")
+        print(f"  {T_GRAY}Available severities: {', '.join(VALID_SEVERITIES)}, all{T_RESET}")
+        ai_sev_raw = _prompt("Package severity (comma-separated, or all)", "Critical")
         if not ai_sev_raw.strip() or ai_sev_raw.strip().lower() == "all":
             config["ai_package_severities"] = []
         else:
