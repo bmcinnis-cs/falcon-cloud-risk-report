@@ -325,6 +325,7 @@ def fetch_ai_ioms(csd):
     ai_rules = [
         rule for rule in rules
         if any(kw in (rule.get("rule", {}).get("rule_name") or "").lower() for kw in AI_IOM_KEYWORDS)
+        and rule.get("misconfigurations", 0) > 0
     ]
 
     result = []
@@ -332,8 +333,6 @@ def fetch_ai_ioms(csd):
         rule_id   = rule_rec["rule"]["rule_id"]
         rule_name = rule_rec["rule"].get("rule_name", "N/A")
         severity  = rule_rec.get("severity", "N/A")
-        misconfigs = rule_rec.get("misconfigurations", 0)
-        assessed   = rule_rec.get("assessed_assets", 0)
 
         entity_ids = []
         after2 = None
@@ -350,48 +349,29 @@ def fetch_ai_ioms(csd):
             if not batch2 or not after2:
                 break
 
-        entities = []
         for i in range(0, len(entity_ids), 100):
             r3 = csd.get_iom_entities(ids=entity_ids[i:i + 100])
             if r3["status_code"] != 200:
                 continue
             for e in r3["body"].get("resources") or []:
-                if e.get("evaluation", {}).get("rule", {}).get("id") == rule_id:
-                    entities.append(e)
-
-        description = ""
-        remediation = ""
-        if entities:
-            eval_rule   = entities[0].get("evaluation", {}).get("rule", {})
-            description = eval_rule.get("description", "")
-            remediation = eval_rule.get("remediation", "")
-
-        assets = []
-        for e in entities:
-            cloud    = e.get("cloud", {})
-            resource = e.get("resource", {})
-            eval_d   = e.get("evaluation", {})
-            assets.append({
-                "resource_id":   resource.get("resource_id", "N/A"),
-                "resource_type": resource.get("resource_type_name") or resource.get("resource_type", "N/A"),
-                "service":       resource.get("service", "N/A"),
-                "provider":      cloud.get("provider", "N/A"),
-                "account_id":    cloud.get("account_id", "N/A"),
-                "account_name":  cloud.get("account_name", "N/A"),
-                "region":        cloud.get("region", "N/A"),
-                "status":        eval_d.get("status", "N/A"),
-            })
-
-        result.append({
-            "rule_id":          rule_id,
-            "rule_name":        rule_name,
-            "severity":         severity,
-            "misconfigurations": misconfigs,
-            "assessed_assets":  assessed,
-            "description":      description,
-            "remediation":      remediation,
-            "assets":           assets,
-        })
+                eval_rule = e.get("evaluation", {}).get("rule", {})
+                if eval_rule.get("id") != rule_id:
+                    continue
+                cloud    = e.get("cloud", {})
+                resource = e.get("resource", {})
+                result.append({
+                    "resource_id":   resource.get("resource_id", "N/A"),
+                    "resource_type": resource.get("resource_type_name") or resource.get("resource_type", "N/A"),
+                    "service":       resource.get("service", "N/A"),
+                    "provider":      (cloud.get("provider") or "").upper(),
+                    "account_id":    cloud.get("account_id", "N/A"),
+                    "account_name":  cloud.get("account_name", "N/A"),
+                    "region":        cloud.get("region", "N/A"),
+                    "rule_name":     rule_name,
+                    "severity":      severity,
+                    "description":   eval_rule.get("description", ""),
+                    "remediation":   eval_rule.get("remediation", ""),
+                })
 
     return result
 
@@ -523,38 +503,33 @@ def print_ai_packages(packages):
     print()
 
 
-def print_ai_ioms(iom_rules):
+def print_ai_ioms(ioms):
     width = 64
     print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}  AI CLOUD SERVICES -- IOM MISCONFIGURATIONS{T_RESET}")
+    print(f"{T_BOLD}{T_CYAN}  AI CLOUD SERVICES -- ACTIVE MISCONFIGURATIONS{T_RESET}")
     print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
-    total_v = sum(r.get("misconfigurations", 0) for r in iom_rules)
-    print(f"  {t_label('AI IOM rules found:')} {T_BOLD}{T_WHITE}{len(iom_rules)}{T_RESET}")
-    print(f"  {t_label('Total violations:  ')} {T_BOLD}{T_RED}{total_v}{T_RESET}")
+    print(f"  {t_label('Active misconfigurations:')} {T_BOLD}{T_RED}{len(ioms)}{T_RESET}")
     print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
 
-    if not iom_rules:
-        print(f"\n  {T_YELLOW}No AI-related IOM rules found.{T_RESET}\n")
+    if not ioms:
+        print(f"\n  {T_YELLOW}No active AI service misconfigurations found.{T_RESET}\n")
         return
 
-    for i, rule in enumerate(iom_rules, 1):
-        print(f"\n  {T_BOLD}{T_WHITE}[{i} of {len(iom_rules)}]{T_RESET}")
-        print(f"  {t_label('Rule:         ')} {T_BOLD}{T_WHITE}{rule['rule_name']}{T_RESET}")
-        print(f"  {t_label('Severity:     ')} {T_BOLD}{T_RED}{rule['severity']}{T_RESET}")
-        print(f"  {t_label('Violations:   ')} {T_BOLD}{T_RED}{rule['misconfigurations']}{T_RESET}")
-        print(f"  {t_label('Assessed:     ')} {T_WHITE}{rule['assessed_assets']}{T_RESET}")
-        if rule.get("description"):
-            desc = rule["description"][:160].replace("\n", " ")
+    for i, iom in enumerate(ioms, 1):
+        print(f"\n  {T_BOLD}{T_WHITE}[{i} of {len(ioms)}]{T_RESET}")
+        print(f"  {t_label('Resource:     ')} {T_BOLD}{T_CYAN}{iom['resource_id']}{T_RESET}")
+        print(f"  {t_label('Type:         ')} {T_WHITE}{iom['resource_type']}{T_RESET}")
+        print(f"  {t_label('Service:      ')} {T_WHITE}{iom['service']}{T_RESET}")
+        print(f"  {t_label('Provider:     ')} {T_BOLD}{T_WHITE}{iom['provider']}{T_RESET}")
+        print(f"  {t_label('Account:      ')} {T_WHITE}{iom['account_name']}{T_GRAY} ({iom['account_id']}){T_RESET}")
+        print(f"  {t_label('Region:       ')} {T_WHITE}{iom['region']}{T_RESET}")
+        print(f"  {t_label('Rule:         ')} {T_BOLD}{T_WHITE}{iom['rule_name']}{T_RESET}")
+        print(f"  {t_label('Severity:     ')} {T_BOLD}{T_RED}{iom['severity']}{T_RESET}")
+        if iom.get("description"):
+            desc = iom["description"][:160].replace("\n", " ")
             print(f"  {t_label('Description:  ')} {T_WHITE}{desc}{T_RESET}")
-        if rule.get("assets"):
-            print(f"\n  {T_BOLD}{T_CYAN}  Violating Assets ({len(rule['assets'])}){T_RESET}")
-            for asset in rule["assets"]:
-                print(f"    {T_CYAN}{asset['resource_id']}{T_RESET}")
-                print(f"      {t_label('Type:')} {T_WHITE}{asset['resource_type']}{T_RESET}  "
-                      f"{t_label('Region:')} {T_WHITE}{asset['region']}{T_RESET}  "
-                      f"{t_label('Account:')} {T_WHITE}{asset['account_id']}{T_RESET}")
-        if rule.get("remediation"):
-            steps = rule["remediation"].split("|\n")
+        if iom.get("remediation"):
+            steps = iom["remediation"].split("|\n")
             print(f"\n  {T_BOLD}{T_CYAN}  Remediation{T_RESET}")
             for step in steps:
                 step = step.strip()
@@ -632,7 +607,7 @@ class FalconReport(FPDF):
         if ai_ioms_count is not None:
             self.set_font("Helvetica", "B", 10)
             self.set_text_color(*LIGHT_GRAY)
-            self.cell(0, 8, f"AI Cloud Services IOMs:  {ai_ioms_count}", align="C",
+            self.cell(0, 8, f"AI Cloud Services -- Active Misconfigurations:  {ai_ioms_count}", align="C",
                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             self.ln(2)
 
@@ -904,7 +879,7 @@ class FalconReport(FPDF):
         self._separator()
 
 
-    def ai_iom_card(self, i, total, rule):
+    def ai_iom_card(self, i, total, iom):
         if self.get_y() > self.h - self.b_margin - 80:
             self.add_page()
 
@@ -914,56 +889,25 @@ class FalconReport(FPDF):
         self.set_text_color(*WHITE)
         self.set_x(self.l_margin)
         self.cell(self.epw, 10,
-                  sanitize(f"  [{i} of {total}]  {rule['rule_name']}"),
+                  sanitize(f"  [{i} of {total}]  {iom['resource_id']}"),
                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         self.ln(1)
 
         fields = [
-            ("Severity",        rule.get("severity")),
-            ("Violations",      rule.get("misconfigurations", 0)),
-            ("Assessed Assets", rule.get("assessed_assets", 0)),
-            ("Description",     rule.get("description")),
+            ("Rule",         iom.get("rule_name")),
+            ("Severity",     iom.get("severity")),
+            ("Service",      iom.get("service")),
+            ("Resource Type",iom.get("resource_type")),
+            ("Provider",     iom.get("provider")),
+            ("Account",      f"{iom.get('account_name', 'N/A')} ({iom.get('account_id', 'N/A')})"),
+            ("Region",       iom.get("region")),
+            ("Description",  iom.get("description")),
         ]
         for idx, (field, value) in enumerate(fields):
             self.row(field, value, alt=idx % 2 == 0)
         self.ln(3)
 
-        assets = rule.get("assets") or []
-        if assets:
-            self.sub_header(f"Violating Assets  ({len(assets)})")
-            col1 = self.epw * 0.40
-            col2 = self.epw * 0.25
-            col3 = self.epw * 0.35
-
-            def _asset_header():
-                self.set_fill_color(*DARK)
-                self.set_font("Helvetica", "B", 7.5)
-                self.set_text_color(*WHITE)
-                self.set_x(self.l_margin)
-                self.cell(col1, 6.5, "  Resource ID", fill=True)
-                self.cell(col2, 6.5, "  Type", fill=True)
-                self.cell(col3, 6.5, "  Region / Account", fill=True,
-                          new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-
-            _asset_header()
-            for idx, asset in enumerate(assets):
-                if self.get_y() + 6.5 > self.h - self.b_margin:
-                    self.add_page()
-                    _asset_header()
-                rid = asset.get("resource_id", "N/A")
-                rid_d = rid if len(rid) <= 30 else rid[:27] + "..."
-                reg_acct = f"{asset.get('region', 'N/A')} / {asset.get('account_id', 'N/A')}"
-                self.set_fill_color(*(SECTION_BG if idx % 2 == 0 else WHITE))
-                self.set_font("Helvetica", "", 7)
-                self.set_text_color(*DARK)
-                self.set_x(self.l_margin)
-                self.cell(col1, 6.5, f"  {rid_d}", fill=True)
-                self.cell(col2, 6.5, f"  {sanitize(asset.get('resource_type', 'N/A'))}", fill=True)
-                self.cell(col3, 6.5, f"  {sanitize(reg_acct)}", fill=True,
-                          new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-            self.ln(4)
-
-        remediation = (rule.get("remediation") or "").strip()
+        remediation = (iom.get("remediation") or "").strip()
         if remediation:
             self.sub_header("Remediation")
             steps = remediation.split("|\n")
@@ -1048,15 +992,15 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ai_ioms, config):
 
     if config.get("include_ai_ioms"):
         pdf.add_page()
-        pdf.section_header(f"AI Cloud Services -- IOM Misconfigurations  ({len(ai_ioms)} rules)")
+        pdf.section_header(f"AI Cloud Services -- Active Misconfigurations  ({len(ai_ioms)} total)")
         if not ai_ioms:
             pdf.set_font("Helvetica", "", 9)
             pdf.set_text_color(*MID_GRAY)
-            pdf.cell(0, 8, "  No AI-related IOM rules found.",
+            pdf.cell(0, 8, "  No active AI service misconfigurations found.",
                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         else:
-            for i, rule in enumerate(ai_ioms, 1):
-                pdf.ai_iom_card(i, len(ai_ioms), rule)
+            for i, iom in enumerate(ai_ioms, 1):
+                pdf.ai_iom_card(i, len(ai_ioms), iom)
 
     pdf.output(output_file)
     print(f"Report written to {output_file}")
@@ -1119,8 +1063,7 @@ if __name__ == "__main__":
     if config["include_ai_ioms"]:
         print(f"{T_DIM}Fetching AI cloud service IOMs...{T_RESET}")
         ai_ioms = fetch_ai_ioms(csd)
-        total_v = sum(r.get("misconfigurations", 0) for r in ai_ioms)
-        print(f"{T_DIM}  Found {len(ai_ioms)} AI IOM rule(s), {total_v} total violation(s).{T_RESET}")
+        print(f"{T_DIM}  Found {len(ai_ioms)} active misconfiguration(s).{T_RESET}")
 
     print()
     if config["include_risks"]:
