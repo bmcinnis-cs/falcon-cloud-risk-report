@@ -334,59 +334,55 @@ def fetch_ai_critical_packages(sdk, severities):
 
 
 def fetch_ai_ioms(csd):
-    # Server-side filter params (policy_id, status) are ignored by this endpoint —
-    # paginate all entity IDs using meta.next cursor (not meta.pagination.after),
-    # then filter client-side by non-compliant status and AI keyword rule name.
-    entity_ids = []
+    # Server-side filters are ignored — paginate all entities page by page,
+    # fetch entity details per page immediately, and filter inline.
+    # Processing per-page avoids collecting 9000+ IDs before doing any work.
+    result = []
     after = None
     while True:
-        params = {"limit": 100}
+        params = {"limit": 500}
         if after:
             params["after"] = after
         r = csd.query_iom_entities(**params)
         dbg_response("query_iom_entities", r)
         if r["status_code"] != 200:
             raise RuntimeError(f"query_iom_entities failed: {r['body'].get('errors')}")
-        batch = r["body"].get("resources") or []
-        entity_ids.extend(batch)
-        after = r["body"].get("meta", {}).get("next")  # cursor is meta.next, not meta.pagination.after
-        dbg(f"  page: {len(batch)} ids, next={'...' if after else None}, total so far={len(entity_ids)}")
-        if not batch or not after:
+        page_ids = r["body"].get("resources") or []
+        after = r["body"].get("meta", {}).get("next")
+        dbg(f"  page: {len(page_ids)} ids, next={'...' if after else None}")
+
+        for i in range(0, len(page_ids), 100):
+            r2 = csd.get_iom_entities(ids=page_ids[i:i + 100])
+            dbg_response("get_iom_entities", r2)
+            if r2["status_code"] != 200:
+                continue
+            for e in r2["body"].get("resources") or []:
+                eval_data = e.get("evaluation", {})
+                if eval_data.get("status") != "non-compliant":
+                    continue
+                eval_rule = eval_data.get("rule", {})
+                rule_name = eval_rule.get("name", "")
+                if not any(kw in rule_name.lower() for kw in AI_IOM_KEYWORDS):
+                    continue
+                cloud    = e.get("cloud", {})
+                resource = e.get("resource", {})
+                severity = (eval_data.get("severity") or "").capitalize() or "N/A"
+                result.append({
+                    "resource_id":   resource.get("resource_id", "N/A"),
+                    "resource_type": resource.get("resource_type_name") or resource.get("resource_type", "N/A"),
+                    "service":       resource.get("service", "N/A"),
+                    "provider":      (cloud.get("provider") or "").upper(),
+                    "account_id":    cloud.get("account_id", "N/A"),
+                    "account_name":  cloud.get("account_name", "N/A"),
+                    "region":        cloud.get("region", "N/A"),
+                    "rule_name":     rule_name,
+                    "severity":      severity,
+                    "description":   eval_rule.get("description", ""),
+                    "remediation":   eval_rule.get("remediation", ""),
+                })
+
+        if not page_ids or not after:
             break
-
-    dbg(f"Total IOM entity IDs: {len(entity_ids)}")
-
-    result = []
-    for i in range(0, len(entity_ids), 100):
-        dbg(f"get_iom_entities batch {i}–{i+100}")
-        r2 = csd.get_iom_entities(ids=entity_ids[i:i + 100])
-        dbg_response("get_iom_entities", r2)
-        if r2["status_code"] != 200:
-            continue
-        for e in r2["body"].get("resources") or []:
-            eval_data = e.get("evaluation", {})
-            if eval_data.get("status") != "non-compliant":
-                continue
-            eval_rule = eval_data.get("rule", {})
-            rule_name = eval_rule.get("name", "")
-            if not any(kw in rule_name.lower() for kw in AI_IOM_KEYWORDS):
-                continue
-            cloud    = e.get("cloud", {})
-            resource = e.get("resource", {})
-            severity = (eval_data.get("severity") or "").capitalize() or "N/A"
-            result.append({
-                "resource_id":   resource.get("resource_id", "N/A"),
-                "resource_type": resource.get("resource_type_name") or resource.get("resource_type", "N/A"),
-                "service":       resource.get("service", "N/A"),
-                "provider":      (cloud.get("provider") or "").upper(),
-                "account_id":    cloud.get("account_id", "N/A"),
-                "account_name":  cloud.get("account_name", "N/A"),
-                "region":        cloud.get("region", "N/A"),
-                "rule_name":     rule_name,
-                "severity":      severity,
-                "description":   eval_rule.get("description", ""),
-                "remediation":   eval_rule.get("remediation", ""),
-            })
 
     return result
 
