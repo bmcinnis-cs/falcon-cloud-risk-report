@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import argparse
 import textwrap
 from datetime import datetime, timezone
@@ -13,7 +14,8 @@ VM_FILTERS = [
     ("Azure", "managed_by:'Unmanaged'+cloud_provider:'azure'+instance_state:'running'"),
     ("GCP",   "managed_by:'Unmanaged'+cloud_provider:'gcp'+instance_state:'running'"),
 ]
-OUTPUT_FILE = "falcon_cloud_security_report.pdf"
+OUTPUT_FILE    = "falcon_cloud_security_report.pdf"
+DEFAULTS_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".report_defaults.json")
 
 VALID_SEVERITIES = ["Critical", "High", "Medium", "Low", "Informational"]
 VALID_PROVIDERS  = ["aws", "azure", "gcp"]
@@ -110,8 +112,9 @@ def interactive_config():
         sevs = [s.strip().capitalize() for s in sev_raw.split(",") if s.strip()]
         config["severities"] = [s for s in sevs if s in VALID_SEVERITIES] or ["High"]
 
-        status_raw = _prompt("Status (Open / Closed / All)", "Open")
-        config["status"] = status_raw.strip().capitalize() if status_raw.strip() else "Open"
+        status_raw = _prompt("Status (Open / Closed / all)", "Open")
+        status_val = status_raw.strip().capitalize() if status_raw.strip() else "Open"
+        config["status"] = status_val if status_val in ("Open", "Closed") else "all"
 
         prov_raw = _prompt("Cloud provider (aws / azure / gcp / all)", "all")
         prov = prov_raw.strip().lower()
@@ -151,24 +154,43 @@ def interactive_config():
     config["output_file"] = _prompt("Output filename", OUTPUT_FILE)
     print()
 
-    return {**_default_config(), **config}
+    merged = {**_default_config(), **config}
+
+    if _prompt_yn("Save as new defaults", default=False):
+        _save_defaults(merged)
+        print(f"  {T_GRAY}Defaults saved to {DEFAULTS_FILE}{T_RESET}\n")
+
+    return merged
 
 
 def _default_config():
-    return {
-        "include_risks":      True,
-        "include_ioas":       True,
-        "include_vms":        True,
+    hardcoded = {
+        "include_risks":          True,
+        "include_ioas":           True,
+        "include_vms":            True,
         "include_ai_packages":    False,
         "include_ai_ioms":        False,
         "ai_package_severities":  ["Critical"],
-        "severities":      ["High"],
-        "status":          "Open",
-        "risk_provider":   "all",
-        "ioa_severities":  [],
-        "vm_providers":    ["AWS", "Azure", "GCP"],
-        "output_file":     OUTPUT_FILE,
+        "severities":             ["High"],
+        "status":                 "Open",
+        "risk_provider":          "all",
+        "ioa_severities":         [],
+        "vm_providers":           ["AWS", "Azure", "GCP"],
+        "output_file":            OUTPUT_FILE,
     }
+    if os.path.exists(DEFAULTS_FILE):
+        try:
+            with open(DEFAULTS_FILE) as f:
+                return {**hardcoded, **json.load(f)}
+        except Exception:
+            pass
+    return hardcoded
+
+
+def _save_defaults(config):
+    to_save = {k: v for k, v in config.items() if k != "output_file"}
+    with open(DEFAULTS_FILE, "w") as f:
+        json.dump(to_save, f, indent=2)
 
 
 def build_filters(config):
@@ -180,7 +202,7 @@ def build_filters(config):
         sev_filter = f"severity:[{joined}]"
 
     status = config.get("status", "Open")
-    risks_filter = sev_filter if status == "All" else f"status:'{status}'+{sev_filter}"
+    risks_filter = sev_filter if status.lower() == "all" else f"status:'{status}'+{sev_filter}"
 
     provider = config.get("risk_provider", "all")
     if provider != "all":
@@ -996,14 +1018,6 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ai_ioms, config):
             for i, ioa in enumerate(ioas, 1):
                 pdf.ioa_card(i, len(ioas), ioa)
 
-    if config.get("include_vms"):
-        pdf.add_page()
-        total_vms = sum(vm_totals.values())
-        pdf.section_header(f"Unmanaged Running VMs  ({total_vms} total)")
-        for provider, assets in vm_data.items():
-            pdf.sub_header(f"{provider}  -  {len(assets)} asset(s)")
-            pdf.vm_table(assets)
-
     if config.get("include_ai_packages"):
         pdf.add_page()
         pdf.section_header(f"AI Package Risks -- Critical CVEs  ({len(ai_packages)} packages)")
@@ -1027,6 +1041,14 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ai_ioms, config):
         else:
             for i, iom in enumerate(ai_ioms, 1):
                 pdf.ai_iom_card(i, len(ai_ioms), iom)
+
+    if config.get("include_vms"):
+        pdf.add_page()
+        total_vms = sum(vm_totals.values())
+        pdf.section_header(f"Unmanaged Running VMs  ({total_vms} total)")
+        for provider, assets in vm_data.items():
+            pdf.sub_header(f"{provider}  -  {len(assets)} asset(s)")
+            pdf.vm_table(assets)
 
     pdf.output(output_file)
     print(f"Report written to {output_file}")
