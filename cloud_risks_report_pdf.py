@@ -225,6 +225,15 @@ def interactive_config():
     else:
         cats = [c.strip() for c in iom_val.split(",") if c.strip()]
         config["iom_categories"] = [c for c in cats if c in IOM_CATEGORIES] or []
+
+    if config["iom_categories"]:
+        print(f"  {T_GRAY}Available severities: {', '.join(VALID_SEVERITIES)}{T_RESET}")
+        iom_sev_raw = _prompt("IOM severity filter (comma-separated, or all)", "all")
+        if not iom_sev_raw.strip() or iom_sev_raw.strip().lower() == "all":
+            config["iom_severities"] = []
+        else:
+            sevs = [s.strip().capitalize() for s in iom_sev_raw.split(",") if s.strip()]
+            config["iom_severities"] = [s for s in sevs if s in VALID_SEVERITIES]
     print()
 
     print(f"  {T_BOLD}Output{T_RESET}")
@@ -247,6 +256,7 @@ def _default_config():
         "include_vms":            True,
         "include_ai_packages":    False,
         "iom_categories":         [],
+        "iom_severities":         [],
         "ai_package_severities":  ["Critical"],
         "severities":             ["High"],
         "status":                 "Open",
@@ -280,6 +290,8 @@ def _sanitize_saved_config(cfg):
         cats = cfg["iom_categories"]
         if isinstance(cats, list):
             out["iom_categories"] = [c for c in cats if c in IOM_CATEGORIES or c == "all"]
+    if "iom_severities" in cfg:
+        out["iom_severities"] = [s for s in cfg["iom_severities"] if s in VALID_SEVERITIES]
     if "severities" in cfg:
         out["severities"] = [s for s in cfg["severities"] if s in VALID_SEVERITIES] or ["High"]
     if "status" in cfg:
@@ -345,7 +357,9 @@ def _filter_desc(config):
     iom_cats = config.get("iom_categories", [])
     if iom_cats:
         label = "all categories" if "all" in iom_cats else ", ".join(iom_cats)
-        parts.append(f"IOMs: {label}")
+        iom_sevs = config.get("iom_severities", [])
+        sev_label = ", ".join(iom_sevs) if iom_sevs else "all severities"
+        parts.append(f"IOMs: {label} / {sev_label}")
     return "  |  ".join(parts)
 
 
@@ -509,10 +523,11 @@ def fetch_ai_critical_packages(sdk, ci, severities):
     return result
 
 
-def fetch_ioms(csd, categories):
+def fetch_ioms(csd, categories, severities=None):
     """Fetch non-compliant IOM entities for the given category list.
 
-    categories: list of category names from IOM_CATEGORIES, or ["all"] for no filter.
+    categories:  list of category names from IOM_CATEGORIES, or ["all"] for no filter.
+    severities:  list of severity strings to keep (e.g. ["High","Critical"]), or [] for all.
     Returns [] immediately if categories is empty.
     """
     if not categories:
@@ -605,6 +620,10 @@ def fetch_ioms(csd, categories):
             "description":   eval_rule.get("description", ""),
             "remediation":   eval_rule.get("remediation", ""),
         })
+
+    if severities:
+        sev_set = {s.lower() for s in severities}
+        result = [r for r in result if r["severity"].lower() in sev_set]
 
     return result
 
@@ -1183,7 +1202,10 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
     output_file = config.get("output_file", OUTPUT_FILE)
     vm_totals = {provider: len(assets) for provider, assets in vm_data.items()}
     iom_cats = config.get("iom_categories", [])
-    ioms_label = "all categories" if "all" in iom_cats else ", ".join(iom_cats)
+    iom_sevs = config.get("iom_severities", [])
+    _iom_cat_label = "all categories" if "all" in iom_cats else ", ".join(iom_cats)
+    _iom_sev_label = ", ".join(iom_sevs) if iom_sevs else "all severities"
+    ioms_label = f"{_iom_cat_label} / {_iom_sev_label}"
     fdesc = _filter_desc(config)
 
     pdf = FalconReport(orientation="P", unit="mm", format="A4")
@@ -1331,9 +1353,11 @@ if __name__ == "__main__":
     ioms = []
     iom_cats = config.get("iom_categories", [])
     if iom_cats:
+        iom_sevs = config.get("iom_severities", [])
         cat_label = "all categories" if "all" in iom_cats else ", ".join(iom_cats)
-        print(f"{T_DIM}Fetching IOMs ({cat_label})...{T_RESET}")
-        ioms = fetch_ioms(csd, iom_cats)
+        sev_label = ", ".join(iom_sevs) if iom_sevs else "all severities"
+        print(f"{T_DIM}Fetching IOMs ({cat_label} / {sev_label})...{T_RESET}")
+        ioms = fetch_ioms(csd, iom_cats, iom_sevs)
         print(f"{T_DIM}  Found {len(ioms)} active misconfiguration(s).{T_RESET}")
 
     print()
