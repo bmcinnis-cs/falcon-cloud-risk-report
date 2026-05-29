@@ -21,18 +21,80 @@ VALID_SEVERITIES = ["Critical", "High", "Medium", "Low", "Informational"]
 VALID_PROVIDERS  = ["aws", "azure", "gcp"]
 SEVERITY_MAP     = {0: "Informational", 1: "Low", 2: "Medium", 3: "High", 4: "Critical"}
 
-# Resource-type substrings found in IOM entity IDs (pipe-segment 4):
-# AWS::SageMaker::*, AWS::Bedrock::*,
-# aiplatform.googleapis.com/* (Vertex AI / Colab),
-# Microsoft.MachineLearningServices/* (Azure ML),
-# Microsoft.CognitiveServices/* (Azure OpenAI / Cognitive)
-AI_IOM_RESOURCE_TYPES = [
-    "sagemaker",
-    "bedrock",
-    "aiplatform",
-    "machinelearningservices",
-    "cognitiveservices",
-]
+# Resource-type substrings (lowercase) in IOM entity IDs (pipe-segment 4),
+# grouped into logical categories. Matching uses substring containment so a
+# single entry like "aws::iam" covers all AWS::IAM::* resource types.
+IOM_CATEGORIES = {
+    "compute": [
+        "aws::ec2::instance",
+        "aws::ec2::volume",
+        "aws::ec2::image",
+        "aws::ec2::snapshot",
+        "aws::ec2::eip",
+        "aws::autoscaling",
+        "compute.googleapis.com/instance",
+        "compute.googleapis.com/disk",
+        "compute.googleapis.com/instancegroupmanager",
+    ],
+    "networking": [
+        "aws::ec2::securitygroup",
+        "aws::ec2::vpc",
+        "aws::ec2::subnet",
+        "aws::ec2::networkacl",
+        "aws::ec2::routetable",
+        "aws::elasticloadbalancing",
+        "compute.googleapis.com/network",
+        "compute.googleapis.com/subnetwork",
+        "compute.googleapis.com/firewall",
+    ],
+    "iam": [
+        "aws::iam",
+        "iam.googleapis.com",
+    ],
+    "storage": [
+        "aws::s3",
+        "storage.googleapis.com/bucket",
+        "artifactregistry.googleapis.com/repository",
+    ],
+    "database": [
+        "aws::rds",
+        "aws::athena",
+        "aws::glue::datacatalog",
+    ],
+    "containers": [
+        "aws::ecr",
+        "aws::eks",
+        "aws::ecs",
+        "container.googleapis.com",
+    ],
+    "serverless": [
+        "aws::lambda",
+        "aws::eventbridge",
+        "pubsub.googleapis.com",
+    ],
+    "ai": [
+        "aws::sagemaker",
+        "aws::bedrock",
+        "aiplatform.googleapis.com",
+        "microsoft.machinelearningservices",
+        "microsoft.cognitiveservices",
+    ],
+    "secrets": [
+        "aws::kms",
+        "aws::secretsmanager",
+        "secretmanager.googleapis.com",
+    ],
+    "account": [
+        "aws::account",
+        "aws::cloudformation",
+        "aws::cloudtrail",
+        "aws::logs::loggroup",
+        "aws::organizations",
+        "cloudresourcemanager.googleapis.com",
+        "logging.googleapis.com",
+    ],
+}
+VALID_IOM_CATEGORIES = sorted(IOM_CATEGORIES.keys()) + ["all"]
 
 # PDF colors (R, G, B)
 CS_RED     = (227, 24,  55)
@@ -102,7 +164,6 @@ def interactive_config():
     config["include_ioas"]  = _prompt_yn("Include Cloud IOA Detections", default=True)
     config["include_vms"]   = _prompt_yn("Include Unmanaged VMs", default=True)
     config["include_ai_packages"] = _prompt_yn("Include AI Package Risks (Critical CVEs)", default=True)
-    config["include_ai_ioms"]     = _prompt_yn("Include AI Cloud Services IOMs", default=True)
     print()
 
     if config["include_risks"]:
@@ -150,6 +211,21 @@ def interactive_config():
         config["vm_providers"] = [_norm[p.lower()] for p in vm_provs if p.lower() in _norm] or ["AWS", "Azure", "GCP"]
         print()
 
+    print(f"  {T_BOLD}IOM Filters{T_RESET}")
+    _cat_list = ", ".join(VALID_IOM_CATEGORIES)
+    print(f"  {T_GRAY}Available categories: {_cat_list}{T_RESET}")
+    print(f"  {T_GRAY}Enter 'none' or leave blank to skip the IOM section.{T_RESET}")
+    iom_raw = _prompt("IOM categories (comma-separated, all, or none)", "none")
+    iom_val = iom_raw.strip().lower()
+    if not iom_val or iom_val == "none":
+        config["iom_categories"] = []
+    elif iom_val == "all":
+        config["iom_categories"] = ["all"]
+    else:
+        cats = [c.strip() for c in iom_val.split(",") if c.strip()]
+        config["iom_categories"] = [c for c in cats if c in IOM_CATEGORIES] or []
+    print()
+
     print(f"  {T_BOLD}Output{T_RESET}")
     config["output_file"] = _prompt("Output filename", OUTPUT_FILE)
     print()
@@ -169,7 +245,7 @@ def _default_config():
         "include_ioas":           True,
         "include_vms":            True,
         "include_ai_packages":    False,
-        "include_ai_ioms":        False,
+        "iom_categories":         [],
         "ai_package_severities":  ["Critical"],
         "severities":             ["High"],
         "status":                 "Open",
@@ -192,10 +268,17 @@ def _default_config():
 def _sanitize_saved_config(cfg):
     """Normalize and drop invalid values from a loaded .report_defaults.json."""
     out = {}
-    bool_keys = ("include_risks", "include_ioas", "include_vms", "include_ai_packages", "include_ai_ioms")
+    bool_keys = ("include_risks", "include_ioas", "include_vms", "include_ai_packages")
     for k in bool_keys:
         if k in cfg:
             out[k] = bool(cfg[k])
+    # Backward compat: old files may have include_ai_ioms; convert to iom_categories
+    if "include_ai_ioms" in cfg and "iom_categories" not in cfg:
+        out["iom_categories"] = ["ai"] if cfg["include_ai_ioms"] else []
+    if "iom_categories" in cfg:
+        cats = cfg["iom_categories"]
+        if isinstance(cats, list):
+            out["iom_categories"] = [c for c in cats if c in IOM_CATEGORIES or c == "all"]
     if "severities" in cfg:
         out["severities"] = [s for s in cfg["severities"] if s in VALID_SEVERITIES] or ["High"]
     if "status" in cfg:
@@ -258,8 +341,10 @@ def _filter_desc(config):
     if config.get("include_ai_packages"):
         ai_sevs = config.get("ai_package_severities", ["Critical"])
         parts.append("AI Packages: " + (", ".join(ai_sevs) if ai_sevs else "all severities"))
-    if config.get("include_ai_ioms"):
-        parts.append("AI Cloud IOMs: all AI service rules")
+    iom_cats = config.get("iom_categories", [])
+    if iom_cats:
+        label = "all categories" if "all" in iom_cats else ", ".join(iom_cats)
+        parts.append(f"IOMs: {label}")
     return "  |  ".join(parts)
 
 
@@ -423,11 +508,25 @@ def fetch_ai_critical_packages(sdk, ci, severities):
     return result
 
 
-def fetch_ai_ioms(csd):
+def fetch_ioms(csd, categories):
+    """Fetch non-compliant IOM entities for the given category list.
+
+    categories: list of category names from IOM_CATEGORIES, or ["all"] for no filter.
+    Returns [] immediately if categories is empty.
+    """
+    if not categories:
+        return []
+
+    if "all" in categories:
+        keywords = None  # accept every resource type
+    else:
+        keywords = set()
+        for cat in categories:
+            for kw in IOM_CATEGORIES.get(cat.lower(), []):
+                keywords.add(kw.lower())
+
     # Step 1: scan all entity IDs; filter by resource_type (pipe-segment 4).
     # Entity ID format: cid|provider|account|region|resource_type|resource_id|rule-uuid
-    # This avoids get_combined_iom_by_rule, which only returns ~100 rules and misses
-    # most AI service rule UUIDs entirely.
     matching_ids = []
     after = None
     page_num = 0
@@ -444,18 +543,18 @@ def fetch_ai_ioms(csd):
             parts = eid.split("|")
             if len(parts) >= 5:
                 rt = parts[4].lower()
-                if any(kw in rt for kw in AI_IOM_RESOURCE_TYPES):
+                if keywords is None or any(kw in rt for kw in keywords):
                     matching_ids.append(eid)
         after = r["body"].get("meta", {}).get("next")
         page_num += 1
-        print(f"  {T_DIM}Scanning IOM page {page_num} ({len(matching_ids)} AI matches so far)...{T_RESET}",
+        print(f"  {T_DIM}Scanning IOM page {page_num} ({len(matching_ids)} matches so far)...{T_RESET}",
               end="\r", flush=True)
-        dbg(f"  page {page_num}: {len(page_ids)} ids, AI matches: {len(matching_ids)}, next={'...' if after else None}")
+        dbg(f"  page {page_num}: {len(page_ids)} ids, matches: {len(matching_ids)}, next={'...' if after else None}")
         if not page_ids or not after:
             break
     print(flush=True)
 
-    dbg(f"Total AI IOM entity IDs matched: {len(matching_ids)}")
+    dbg(f"Total IOM entity IDs matched: {len(matching_ids)}")
     if not matching_ids:
         return []
 
@@ -681,7 +780,7 @@ class FalconReport(FPDF):
         self.cell(0, 8, f"Generated {now_utc()}  |  Page {self.page_no()}", align="C")
 
     def cover(self, risks_count=None, ioas_count=None, vm_totals=None,
-              ai_packages_count=None, ai_ioms_count=None, filter_desc=""):
+              ai_packages_count=None, ioms_count=None, ioms_label="", filter_desc=""):
         self.set_fill_color(*DARK)
         self.rect(0, 0, 210, 297, "F")
         self.set_y(80)
@@ -723,10 +822,11 @@ class FalconReport(FPDF):
                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             self.ln(2)
 
-        if ai_ioms_count is not None:
+        if ioms_count is not None:
             self.set_font("Helvetica", "B", 10)
             self.set_text_color(*LIGHT_GRAY)
-            self.cell(0, 8, f"AI Cloud Services -- Active Misconfigurations:  {ai_ioms_count}", align="C",
+            label = f"Cloud Service IOMs ({ioms_label}):  {ioms_count}" if ioms_label else f"Cloud Service IOMs:  {ioms_count}"
+            self.cell(0, 8, label, align="C",
                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             self.ln(2)
 
@@ -1060,9 +1160,11 @@ class FalconReport(FPDF):
         self._separator()
 
 
-def build_pdf(risks, ioas, vm_data, ai_packages, ai_ioms, config):
+def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
     output_file = config.get("output_file", OUTPUT_FILE)
     vm_totals = {provider: len(assets) for provider, assets in vm_data.items()}
+    iom_cats = config.get("iom_categories", [])
+    ioms_label = "all categories" if "all" in iom_cats else ", ".join(iom_cats)
     fdesc = _filter_desc(config)
 
     pdf = FalconReport(orientation="P", unit="mm", format="A4")
@@ -1075,7 +1177,8 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ai_ioms, config):
         ioas_count=len(ioas)               if config.get("include_ioas")        else None,
         vm_totals=vm_totals                if config.get("include_vms")         else None,
         ai_packages_count=len(ai_packages) if config.get("include_ai_packages") else None,
-        ai_ioms_count=len(ai_ioms)         if config.get("include_ai_ioms")     else None,
+        ioms_count=len(ioms)               if iom_cats                          else None,
+        ioms_label=ioms_label              if iom_cats                          else "",
         filter_desc=fdesc,
     )
 
@@ -1115,17 +1218,18 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ai_ioms, config):
             for i, pkg in enumerate(ai_packages, 1):
                 pdf.ai_package_card(i, len(ai_packages), pkg)
 
-    if config.get("include_ai_ioms"):
+    if iom_cats:
         pdf.add_page()
-        pdf.section_header(f"AI Cloud Services -- Active Misconfigurations  ({len(ai_ioms)} total)")
-        if not ai_ioms:
+        section_title = f"Cloud Service IOMs  ({len(ioms)} total)  —  {ioms_label}"
+        pdf.section_header(section_title)
+        if not ioms:
             pdf.set_font("Helvetica", "", 9)
             pdf.set_text_color(*MID_GRAY)
-            pdf.cell(0, 8, "  No active AI service misconfigurations found.",
+            pdf.cell(0, 8, "  No active misconfigurations found for the selected categories.",
                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         else:
-            for i, iom in enumerate(ai_ioms, 1):
-                pdf.ai_iom_card(i, len(ai_ioms), iom)
+            for i, iom in enumerate(ioms, 1):
+                pdf.ai_iom_card(i, len(ioms), iom)
 
     if config.get("include_vms"):
         pdf.add_page()
@@ -1205,11 +1309,13 @@ if __name__ == "__main__":
         ai_packages = fetch_ai_critical_packages(cp, ci, ai_sevs)
         print(f"{T_DIM}  Found {len(ai_packages)} AI package(s) matching filter.{T_RESET}")
 
-    ai_ioms = []
-    if config["include_ai_ioms"]:
-        print(f"{T_DIM}Fetching AI cloud service IOMs...{T_RESET}")
-        ai_ioms = fetch_ai_ioms(csd)
-        print(f"{T_DIM}  Found {len(ai_ioms)} active misconfiguration(s).{T_RESET}")
+    ioms = []
+    iom_cats = config.get("iom_categories", [])
+    if iom_cats:
+        cat_label = "all categories" if "all" in iom_cats else ", ".join(iom_cats)
+        print(f"{T_DIM}Fetching IOMs ({cat_label})...{T_RESET}")
+        ioms = fetch_ioms(csd, iom_cats)
+        print(f"{T_DIM}  Found {len(ioms)} active misconfiguration(s).{T_RESET}")
 
     print()
     if config["include_risks"]:
@@ -1220,9 +1326,9 @@ if __name__ == "__main__":
         print_vms(vm_data)
     if config["include_ai_packages"]:
         print_ai_packages(ai_packages)
-    if config["include_ai_ioms"]:
-        print_ai_ioms(ai_ioms)
+    if iom_cats:
+        print_ai_ioms(ioms)
 
     print(f"{T_DIM}Building PDF...{T_RESET}")
-    build_pdf(risks, ioas, vm_data, ai_packages, ai_ioms, config)
+    build_pdf(risks, ioas, vm_data, ai_packages, ioms, config)
     print(f"{T_BOLD}{T_CYAN}PDF written to {config['output_file']}{T_RESET}")
