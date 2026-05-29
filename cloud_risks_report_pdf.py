@@ -105,6 +105,7 @@ LIGHT_GRAY = (230, 230, 230)
 WHITE      = (255, 255, 255)
 AMBER      = (200, 130, 0)
 SECTION_BG = (245, 245, 245)
+LINK_BLUE  = (0,   102, 204)
 
 # ANSI terminal colors
 T_RESET  = "\033[0m"
@@ -612,9 +613,10 @@ def fetch_ioms(csd, categories, severities=None):
         resource = e.get("resource", {})
         severity = (eval_data.get("severity") or "").capitalize() or "N/A"
         result.append({
-            "resource_id":   resource.get("resource_id", "N/A"),
-            "resource_type": resource.get("resource_type_name") or resource.get("resource_type", "N/A"),
-            "service":       resource.get("service", "N/A"),
+            "resource_id":       resource.get("resource_id", "N/A"),
+            "resource_type":     resource.get("resource_type_name") or resource.get("resource_type", "N/A"),
+            "resource_type_raw": resource.get("resource_type", "").lower(),
+            "service":           resource.get("service", "N/A"),
             "provider":      (cloud.get("provider") or "").upper(),
             "account_id":    cloud.get("account_id", "N/A"),
             "account_name":  cloud.get("account_name", "N/A"),
@@ -799,6 +801,75 @@ def print_ai_ioms(ioms):
         print(f"\n  {T_GRAY}{'-' * (width - 2)}{T_RESET}")
     print()
 
+def _console_url(iom):
+    """Build a cloud console deep-link URL for the given IOM resource dict."""
+    provider = (iom.get("provider") or "").upper()
+    raw      = (iom.get("resource_type_raw") or "").lower()
+    rid      = (iom.get("resource_id") or "").strip()
+    region   = (iom.get("region") or "us-east-1").strip()
+    acct     = (iom.get("account_id") or "").strip()
+
+    if provider == "AWS":
+        b = "https://console.aws.amazon.com"
+        if "::ec2::instance"       in raw: return f"{b}/ec2/v2/home?region={region}#Instances:instanceId={rid}"
+        if "::ec2::securitygroup"  in raw: return f"{b}/vpc/home?region={region}#securityGroups:groupId={rid}"
+        if "::ec2::snapshot"       in raw: return f"{b}/ec2/v2/home?region={region}#Snapshots:snapshotId={rid}"
+        if "::ec2::volume"         in raw: return f"{b}/ec2/v2/home?region={region}#Volumes:volumeId={rid}"
+        if "::ec2::image"          in raw: return f"{b}/ec2/v2/home?region={region}#Images:imageId={rid}"
+        if "::ec2::eip"            in raw: return f"{b}/ec2/v2/home?region={region}#Addresses:"
+        if "::autoscaling::"       in raw: return f"{b}/ec2/v2/home?region={region}#AutoScalingGroups"
+        if "::elasticloadbalancing" in raw: return f"{b}/ec2/v2/home?region={region}#LoadBalancers"
+        if "::ec2::vpc"            in raw: return f"{b}/vpc/home?region={region}"
+        if "::ec2::subnet"         in raw: return f"{b}/vpc/home?region={region}#subnets:"
+        if "::ec2::networkacl"     in raw: return f"{b}/vpc/home?region={region}#acls:"
+        if "::ec2::routetable"     in raw: return f"{b}/vpc/home?region={region}#RouteTables:"
+        if "::s3::"                in raw: return f"https://s3.console.aws.amazon.com/s3/buckets/{rid}"
+        if "::iam::"               in raw: return f"{b}/iam/home"
+        if "::lambda::"            in raw: return f"{b}/lambda/home?region={region}#/functions/{rid}"
+        if "::rds::"               in raw: return f"{b}/rds/home?region={region}#database:id={rid}"
+        if "::athena::"            in raw: return f"{b}/athena/home?region={region}"
+        if "::glue::"              in raw: return f"{b}/glue/home?region={region}"
+        if "::ecr::"               in raw: return f"{b}/ecr/repositories?region={region}"
+        if "::eks::"               in raw: return f"{b}/eks/home?region={region}#/clusters/{rid}"
+        if "::ecs::"               in raw: return f"{b}/ecs/home?region={region}"
+        if "::eventbridge::"       in raw: return f"{b}/events/home?region={region}"
+        if "::kms::"               in raw: return f"{b}/kms/home?region={region}#/kms/keys/{rid}"
+        if "::secretsmanager::"    in raw: return f"{b}/secretsmanager/home?region={region}#!/secret?name={rid}"
+        if "::sagemaker::"         in raw: return f"{b}/sagemaker/home?region={region}"
+        if "::bedrock::"           in raw: return f"{b}/bedrock/home?region={region}"
+        if "::cloudtrail::"        in raw: return f"{b}/cloudtrail/home?region={region}"
+        if "::cloudformation::"    in raw: return f"{b}/cloudformation/home?region={region}"
+        if "::logs::loggroup"      in raw: return f"{b}/cloudwatch/home?region={region}#logsV2:log-groups"
+        if "::organizations::"     in raw: return f"{b}/organizations/v2/home"
+        if "::account::"           in raw: return f"{b}/billing/home"
+        return f"{b}/console/home?region={region}"
+
+    if provider == "GCP":
+        proj = acct
+        if "compute.googleapis.com/instancegroupmanager" in raw: return f"https://console.cloud.google.com/compute/instancegroups/list?project={proj}"
+        if "compute.googleapis.com/instance"   in raw: return f"https://console.cloud.google.com/compute/instances?project={proj}"
+        if "compute.googleapis.com/disk"       in raw: return f"https://console.cloud.google.com/compute/disks?project={proj}"
+        if "compute.googleapis.com/firewall"   in raw: return f"https://console.cloud.google.com/networking/firewalls/list?project={proj}"
+        if "compute.googleapis.com/network"    in raw: return f"https://console.cloud.google.com/networking/networks/list?project={proj}"
+        if "compute.googleapis.com/subnetwork" in raw: return f"https://console.cloud.google.com/networking/subnetworks/list?project={proj}"
+        if "storage.googleapis.com"            in raw: return f"https://console.cloud.google.com/storage/browser/{rid}?project={proj}"
+        if "iam.googleapis.com"                in raw: return f"https://console.cloud.google.com/iam-admin/iam?project={proj}"
+        if "container.googleapis.com"          in raw: return f"https://console.cloud.google.com/kubernetes/list?project={proj}"
+        if "aiplatform.googleapis.com"         in raw: return f"https://console.cloud.google.com/vertex-ai?project={proj}"
+        if "secretmanager.googleapis.com"      in raw: return f"https://console.cloud.google.com/security/secret-manager?project={proj}"
+        if "pubsub.googleapis.com"             in raw: return f"https://console.cloud.google.com/cloudpubsub/topic/list?project={proj}"
+        if "artifactregistry.googleapis.com"   in raw: return f"https://console.cloud.google.com/artifacts?project={proj}"
+        if "logging.googleapis.com"            in raw: return f"https://console.cloud.google.com/logs?project={proj}"
+        return f"https://console.cloud.google.com/home/dashboard?project={proj}"
+
+    if provider in ("AZURE", "MICROSOFT"):
+        if rid.startswith("/subscriptions/"):
+            return f"https://portal.azure.com/#resource{rid}"
+        return "https://portal.azure.com"
+
+    return ""
+
+
 class FalconReport(FPDF):
     LABEL_W = 34
 
@@ -935,6 +1006,30 @@ class FalconReport(FPDF):
         self.set_xy(self.l_margin + self.LABEL_W, row_y)
         self.multi_cell(self.epw - self.LABEL_W, 6, text, fill=True,
                         new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    def link_row(self, field, url, alt=False):
+        if not url:
+            return
+        col_w = self.epw - self.LABEL_W
+        if self.get_y() + 8 > self.h - self.b_margin:
+            self.add_page()
+        fill_color = SECTION_BG if alt else WHITE
+        self.set_fill_color(*fill_color)
+        row_y = self.get_y()
+
+        self.set_font("Helvetica", "B", 8)
+        self.set_text_color(*MID_GRAY)
+        self.set_xy(self.l_margin, row_y)
+        self.multi_cell(self.LABEL_W, 6, field, fill=True,
+                        new_x=XPos.RIGHT, new_y=YPos.TOP)
+
+        self.set_font("Helvetica", "", 8)
+        self.set_text_color(*LINK_BLUE)
+        self.set_xy(self.l_margin + self.LABEL_W, row_y)
+        display = sanitize(url[:90] + ("..." if len(url) > 90 else ""))
+        self.cell(col_w, 6, display, fill=True, link=url,
+                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        self.set_text_color(*DARK)
 
     def _separator(self):
         if self.get_y() + 10 > self.h - self.b_margin:
@@ -1168,34 +1263,44 @@ class FalconReport(FPDF):
                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         self.ln(1)
 
+        console_url = _console_url(iom)
         fields = [
-            ("Rule",         iom.get("rule_name")),
-            ("Severity",     iom.get("severity")),
-            ("Service",      iom.get("service")),
-            ("Resource Type",iom.get("resource_type")),
-            ("Provider",     iom.get("provider")),
-            ("Account",      f"{iom.get('account_name', 'N/A')} ({iom.get('account_id', 'N/A')})"),
-            ("Region",       iom.get("region")),
-            ("Description",  iom.get("description")),
+            ("Rule",          iom.get("rule_name")),
+            ("Severity",      iom.get("severity")),
+            ("Service",       iom.get("service")),
+            ("Resource Type", iom.get("resource_type")),
+            ("Provider",      iom.get("provider")),
+            ("Account",       f"{iom.get('account_name', 'N/A')} ({iom.get('account_id', 'N/A')})"),
+            ("Region",        iom.get("region")),
+            ("Description",   iom.get("description")),
         ]
         for idx, (field, value) in enumerate(fields):
             self.row(field, value, alt=idx % 2 == 0)
+        if console_url:
+            self.link_row("Console", console_url, alt=len(fields) % 2 == 0)
         self.ln(3)
 
         remediation = (iom.get("remediation") or "").strip()
         if remediation:
+            if self.get_y() > self.h - self.b_margin - 40:
+                self.add_page()
             self.sub_header("Remediation")
             steps = remediation.split("|\n")
+            col_w = self.epw - 4
             for step in steps:
                 step = step.strip()
                 if not step:
                     continue
-                if self.get_y() > self.h - self.b_margin - 20:
-                    self.add_page()
                 self.set_font("Helvetica", "", 7.5)
+                char_w = self.get_string_width("m") or 2.0
+                chars_per_line = max(1, int(col_w / char_w))
+                n_lines = max(1, -(-len(step) // chars_per_line))
+                step_h = n_lines * 5.5 + 4
+                if self.get_y() + step_h > self.h - self.b_margin:
+                    self.add_page()
                 self.set_text_color(*MID_GRAY)
                 self.set_x(self.l_margin + 4)
-                self.multi_cell(self.epw - 4, 5.5, sanitize(step),
+                self.multi_cell(col_w, 5.5, sanitize(step),
                                 new_x=XPos.LMARGIN, new_y=YPos.NEXT)
                 self.ln(1)
 
