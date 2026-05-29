@@ -44,6 +44,24 @@ T_CYAN   = "\033[96m"
 T_WHITE  = "\033[97m"
 T_GRAY   = "\033[90m"
 
+DEBUG = False
+
+
+def dbg(msg):
+    if DEBUG:
+        print(f"{T_GRAY}[debug] {msg}{T_RESET}")
+
+
+def dbg_response(label, r):
+    if not DEBUG:
+        return
+    status = r.get("status_code", "?")
+    color = T_YELLOW if status != 200 else T_GRAY
+    print(f"{color}[debug] {label}  →  HTTP {status}{T_RESET}")
+    if status != 200:
+        print(f"{T_RED}[debug]   errors: {r.get('body', {}).get('errors')}{T_RESET}")
+        print(f"{T_RED}[debug]   body:   {str(r.get('body', ''))[:400]}{T_RESET}")
+
 
 # --- Interactive configuration ---
 
@@ -311,7 +329,9 @@ def fetch_ai_ioms(cloud_policies, csd):
     all_ids = []
     offset = 0
     while True:
+        dbg(f"query_rule offset={offset}")
         r = cloud_policies.query_rule(limit=500, offset=offset)
+        dbg_response("query_rule", r)
         if r["status_code"] != 200:
             raise RuntimeError(f"query_rule failed: {r['body'].get('errors')}")
         ids = r["body"].get("resources") or []
@@ -321,9 +341,13 @@ def fetch_ai_ioms(cloud_policies, csd):
         if offset >= total or not ids:
             break
 
+    dbg(f"total policy IDs: {len(all_ids)}")
+
     policies = []
     for i in range(0, len(all_ids), 500):
+        dbg(f"get_rule batch {i}–{i+500}")
         r = cloud_policies.get_rule(ids=all_ids[i:i + 500])
+        dbg_response("get_rule", r)
         if r["status_code"] != 200:
             continue
         policies.extend(r["body"].get("resources") or [])
@@ -332,6 +356,7 @@ def fetch_ai_ioms(cloud_policies, csd):
         p for p in policies
         if any(kw in (p.get("name") or "").lower() for kw in AI_IOM_KEYWORDS)
     ]
+    dbg(f"AI policies matched: {len(ai_policies)}")
 
     # Step 2: for each AI policy use its integer short_code as policy_id
     # to query IOM entities — this is the correct parameter, not rule_id (UUID)
@@ -342,11 +367,13 @@ def fetch_ai_ioms(cloud_policies, csd):
             continue
         policy_name = policy.get("name", "N/A")
         policy_severity = policy.get("severity", "N/A")
+        dbg(f"querying policy_id={policy_id}  '{policy_name}'")
 
         entity_ids = []
         offset2 = 0
         while True:
             r2 = csd.query_iom_entities(policy_id=policy_id, limit=100, offset=offset2)
+            dbg_response(f"query_iom_entities(policy_id={policy_id})", r2)
             if r2["status_code"] != 200:
                 break
             batch2 = r2["body"].get("resources") or []
@@ -356,11 +383,14 @@ def fetch_ai_ioms(cloud_policies, csd):
             if offset2 >= total2 or not batch2:
                 break
 
+        dbg(f"  entity IDs found: {len(entity_ids)}")
         if not entity_ids:
             continue
 
         for i in range(0, len(entity_ids), 100):
+            dbg(f"  get_iom_entities batch {i}–{i+100}")
             r3 = csd.get_iom_entities(ids=entity_ids[i:i + 100])
+            dbg_response("get_iom_entities", r3)
             if r3["status_code"] != 200:
                 continue
             for e in r3["body"].get("resources") or []:
@@ -1021,7 +1051,15 @@ if __name__ == "__main__":
         action="store_true",
         help="Prompt for report configuration (sections, filters, output filename)",
     )
+    parser.add_argument(
+        "-d", "--debug",
+        action="store_true",
+        help="Print API call status codes and error bodies for troubleshooting",
+    )
     args = parser.parse_args()
+
+    global DEBUG
+    DEBUG = args.debug
 
     load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
