@@ -5,7 +5,7 @@ import argparse
 import textwrap
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, CloudSecurityDetections
+from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections
 from fpdf import FPDF, XPos, YPos
 
 RISKS_FILTER = "status:'Open'+severity:'High'"
@@ -358,7 +358,38 @@ def fetch_unmanaged_vms(sdk, filter_str):
     return assets
 
 
-def fetch_ai_critical_packages(sdk, severities):
+def _image_label(img):
+    reg  = (img.get("registry")   or "").strip()
+    repo = (img.get("repository") or "").strip()
+    tag  = (img.get("tag")        or "latest").strip()
+    return f"{reg}/{repo}:{tag}" if reg else f"{repo}:{tag}"
+
+
+def fetch_images_for_package(ci, package_name_version):
+    """Return a deduplicated list of image name strings containing this package."""
+    images = []
+    seen_digests = set()
+    after = None
+    while True:
+        params = {"filter": f"package_name_version:'{package_name_version}'", "limit": 100}
+        if after:
+            params["after"] = after
+        r = ci.ReadCombinedImagesExport(**params)
+        if r["status_code"] != 200:
+            break
+        batch = r["body"].get("resources") or []
+        for img in batch:
+            digest = img.get("image_digest") or img.get("image_id") or _image_label(img)
+            if digest not in seen_digests:
+                seen_digests.add(digest)
+                images.append(_image_label(img))
+        after = r["body"].get("meta", {}).get("pagination", {}).get("after")
+        if not batch or not after:
+            break
+    return images
+
+
+def fetch_ai_critical_packages(sdk, ci, severities):
     target = {s.lower() for s in severities} if severities else None
     packages = []
     after = None
@@ -380,11 +411,13 @@ def fetch_ai_critical_packages(sdk, severities):
         matched = [v for v in (pkg.get("vulnerabilities") or [])
                    if target is None or v.get("severity", "").lower() in target]
         if matched:
+            images = fetch_images_for_package(ci, pkg["package_name_version"])
             result.append({
-                "package_name_version": pkg.get("package_name_version", "N/A"),
-                "type":                 pkg.get("type", "N/A"),
-                "all_images":           pkg.get("all_images", 0),
-                "running_images":       pkg.get("running_images", 0),
+                "package_name_version":    pkg.get("package_name_version", "N/A"),
+                "type":                    pkg.get("type", "N/A"),
+                "all_images":              pkg.get("all_images", 0),
+                "running_images":          pkg.get("running_images", 0),
+                "images":                  images,
                 "critical_vulnerabilities": matched,
             })
     return result
@@ -567,10 +600,14 @@ def print_ai_packages(packages):
 
     for i, pkg in enumerate(packages, 1):
         vulns = pkg["critical_vulnerabilities"]
+        images = pkg.get("images") or []
         print(f"\n  {T_BOLD}{T_WHITE}[{i} of {len(packages)}]{T_RESET}")
         print(f"  {t_label('Package:  ')} {T_BOLD}{T_WHITE}{pkg['package_name_version']}{T_RESET}")
         print(f"  {t_label('Type:     ')} {T_WHITE}{pkg['type']}{T_RESET}")
         print(f"  {t_label('Images:   ')} {T_WHITE}{pkg['all_images']} total  |  {pkg['running_images']} running{T_RESET}")
+        if images:
+            for img_name in images:
+                print(f"              {T_DIM}{T_WHITE}{img_name}{T_RESET}")
         print(f"  {t_label('Critical: ')} {T_BOLD}{T_RED}{len(vulns)} CVE(s){T_RESET}")
         for v in vulns:
             fix = v.get("fix_resolution") or []
@@ -923,6 +960,20 @@ class FalconReport(FPDF):
         ]
         for idx, (field, value) in enumerate(fields):
             self.row(field, value, alt=idx % 2 == 0)
+
+        images = pkg.get("images") or []
+        if images:
+            self.ln(2)
+            self.sub_header("Images")
+            for img_name in images:
+                if self.get_y() > self.h - self.b_margin - 10:
+                    self.add_page()
+                self.set_font("Helvetica", "", 8)
+                self.set_text_color(*MID_GRAY)
+                self.set_x(self.l_margin + 4)
+                self.cell(self.epw - 4, 6, sanitize(img_name),
+                          new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
         self.ln(3)
 
         self.sub_header("Critical Vulnerabilities")
@@ -1123,6 +1174,7 @@ if __name__ == "__main__":
     csa             = CloudSecurityAssets(auth_object=auth)
     alerts          = Alerts(auth_object=auth)
     cp              = ContainerPackages(auth_object=auth)
+    ci              = ContainerImages(auth_object=auth)
     csd             = CloudSecurityDetections(auth_object=auth)
 
     risks = []
@@ -1150,7 +1202,7 @@ if __name__ == "__main__":
         ai_sevs = config.get("ai_package_severities", ["Critical"])
         sev_label = ", ".join(ai_sevs) if ai_sevs else "all severities"
         print(f"{T_DIM}Fetching AI-related packages ({sev_label})...{T_RESET}")
-        ai_packages = fetch_ai_critical_packages(cp, ai_sevs)
+        ai_packages = fetch_ai_critical_packages(cp, ci, ai_sevs)
         print(f"{T_DIM}  Found {len(ai_packages)} AI package(s) matching filter.{T_RESET}")
 
     ai_ioms = []
