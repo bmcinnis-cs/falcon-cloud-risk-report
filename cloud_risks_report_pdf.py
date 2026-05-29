@@ -834,11 +834,11 @@ def _arn_name(rid):
 def _falcon_iom_url(iom):
     """Build a Falcon console deep-link for the given IOM entity.
 
-    URL format (reverse-engineered from working console URL):
-    /cloud-security/cspm/assessment/ng-configuration/{encoded_entity_id}/summary
-        ?filter=extension_status:'Unresolved'+resource_status:'active'
-               +severity:'{lower}'+rule_id:'{rule_uuid}'
-        &summaryTab=1&view=iom
+    Primary: entity_id path targets the specific entity directly.
+    Filter includes resource_id so that if the path redirects to the list view,
+    the list is still scoped to the exact resource rather than all rule violations.
+
+    Entity ID format: cid|provider|account|region|resource_type|resource_id|rule-uuid
     """
     entity_id = iom.get("entity_id", "")
     if not entity_id:
@@ -856,8 +856,9 @@ def _falcon_iom_url(iom):
             console = "https://falcon.crowdstrike.com"
 
     parts = entity_id.split("|")
-    rule_uuid = parts[6] if len(parts) >= 7 else ""   # index 6 is always the rule UUID
-    severity  = (iom.get("severity") or "high").lower()
+    resource_id = parts[5] if len(parts) >= 6 else ""  # segment 5 = resource_id
+    rule_uuid   = parts[6] if len(parts) >= 7 else ""  # segment 6 = rule UUID
+    severity    = (iom.get("severity") or "high").lower()
 
     # Pipes encode as %7C; colons in resource_type stay bare
     encoded_id = entity_id.replace("|", "%7C")
@@ -866,7 +867,8 @@ def _falcon_iom_url(iom):
         f"extension_status:'Unresolved'"
         f"+resource_status:'active'"
         f"+severity:'{severity}'"
-        + (f"+rule_id:'{rule_uuid}'" if rule_uuid else "")
+        + (f"+rule_id:'{rule_uuid}'"   if rule_uuid   else "")
+        + (f"+resource_id:'{resource_id}'" if resource_id else "")
     )
     encoded_filter = quote(filter_str, safe="")
 
