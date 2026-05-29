@@ -1350,7 +1350,15 @@ class FalconReport(FPDF):
             ("Region",        iom.get("region")),
             ("Description",   iom.get("description")),
         ]
+        col_w = self.epw - self.LABEL_W
         for idx, (field, value) in enumerate(fields):
+            self.set_font("Helvetica", "", 8)
+            char_w = self.get_string_width("m") or 2.5
+            chars_per_line = max(1, int(col_w / char_w))
+            n_lines = max(1, -(-len(str(value or "N/A")) // chars_per_line))
+            field_h = n_lines * 6 + 4
+            if self.get_y() + field_h > self.h - self.b_margin:
+                self.add_page()
             self.row(field, value, alt=idx % 2 == 0)
         if console_url:
             self.link_row("Console", console_url, alt=len(fields) % 2 == 0)
