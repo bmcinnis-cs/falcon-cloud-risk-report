@@ -19,11 +19,17 @@ VALID_SEVERITIES = ["Critical", "High", "Medium", "Low", "Informational"]
 VALID_PROVIDERS  = ["aws", "azure", "gcp"]
 SEVERITY_MAP     = {0: "Informational", 1: "Low", 2: "Medium", 3: "High", 4: "Critical"}
 
-AI_IOM_KEYWORDS = [
-    "sagemaker", "bedrock", "rekognition", "comprehend",
-    "machine learning", "vertex", "ai platform", "cognitive",
-    "openai", "azure ai", "azure ml", "azure machine",
-    "ai service", "ai model", "generative", "llm", "notebook",
+# Resource-type substrings found in IOM entity IDs (pipe-segment 4):
+# AWS::SageMaker::*, AWS::Bedrock::*,
+# aiplatform.googleapis.com/* (Vertex AI / Colab),
+# Microsoft.MachineLearningServices/* (Azure ML),
+# Microsoft.CognitiveServices/* (Azure OpenAI / Cognitive)
+AI_IOM_RESOURCE_TYPES = [
+    "sagemaker",
+    "bedrock",
+    "aiplatform",
+    "machinelearningservices",
+    "cognitiveservices",
 ]
 
 # PDF colors (R, G, B)
@@ -334,10 +340,11 @@ def fetch_ai_critical_packages(sdk, severities):
 
 
 def fetch_ai_ioms(csd):
-    # Server-side filters are ignored — paginate all entities page by page,
-    # fetch entity details per page immediately, and filter inline.
-    # Processing per-page avoids collecting 9000+ IDs before doing any work.
-    result = []
+    # Step 1: scan all entity IDs; filter by resource_type (pipe-segment 4).
+    # Entity ID format: cid|provider|account|region|resource_type|resource_id|rule-uuid
+    # This avoids get_combined_iom_by_rule, which only returns ~100 rules and misses
+    # most AI service rule UUIDs entirely.
+    matching_ids = []
     after = None
     while True:
         params = {"limit": 500}
@@ -348,41 +355,49 @@ def fetch_ai_ioms(csd):
         if r["status_code"] != 200:
             raise RuntimeError(f"query_iom_entities failed: {r['body'].get('errors')}")
         page_ids = r["body"].get("resources") or []
+        for eid in page_ids:
+            parts = eid.split("|")
+            if len(parts) >= 5:
+                rt = parts[4].lower()
+                if any(kw in rt for kw in AI_IOM_RESOURCE_TYPES):
+                    matching_ids.append(eid)
         after = r["body"].get("meta", {}).get("next")
-        dbg(f"  page: {len(page_ids)} ids, next={'...' if after else None}")
-
-        for i in range(0, len(page_ids), 100):
-            r2 = csd.get_iom_entities(ids=page_ids[i:i + 100])
-            dbg_response("get_iom_entities", r2)
-            if r2["status_code"] != 200:
-                continue
-            for e in r2["body"].get("resources") or []:
-                eval_data = e.get("evaluation", {})
-                if eval_data.get("status") != "non-compliant":
-                    continue
-                eval_rule = eval_data.get("rule", {})
-                rule_name = eval_rule.get("name", "")
-                if not any(kw in rule_name.lower() for kw in AI_IOM_KEYWORDS):
-                    continue
-                cloud    = e.get("cloud", {})
-                resource = e.get("resource", {})
-                severity = (eval_data.get("severity") or "").capitalize() or "N/A"
-                result.append({
-                    "resource_id":   resource.get("resource_id", "N/A"),
-                    "resource_type": resource.get("resource_type_name") or resource.get("resource_type", "N/A"),
-                    "service":       resource.get("service", "N/A"),
-                    "provider":      (cloud.get("provider") or "").upper(),
-                    "account_id":    cloud.get("account_id", "N/A"),
-                    "account_name":  cloud.get("account_name", "N/A"),
-                    "region":        cloud.get("region", "N/A"),
-                    "rule_name":     rule_name,
-                    "severity":      severity,
-                    "description":   eval_rule.get("description", ""),
-                    "remediation":   eval_rule.get("remediation", ""),
-                })
-
+        dbg(f"  page: {len(page_ids)} ids, AI matches so far: {len(matching_ids)}")
         if not page_ids or not after:
             break
+
+    dbg(f"Total AI IOM entity IDs matched: {len(matching_ids)}")
+    if not matching_ids:
+        return []
+
+    # Step 2: fetch full details only for the matched IDs
+    result = []
+    for i in range(0, len(matching_ids), 100):
+        r2 = csd.get_iom_entities(ids=matching_ids[i:i + 100])
+        dbg_response("get_iom_entities", r2)
+        if r2["status_code"] != 200:
+            continue
+        for e in r2["body"].get("resources") or []:
+            eval_data = e.get("evaluation", {})
+            if eval_data.get("status") != "non-compliant":
+                continue
+            eval_rule = eval_data.get("rule", {})
+            cloud    = e.get("cloud", {})
+            resource = e.get("resource", {})
+            severity = (eval_data.get("severity") or "").capitalize() or "N/A"
+            result.append({
+                "resource_id":   resource.get("resource_id", "N/A"),
+                "resource_type": resource.get("resource_type_name") or resource.get("resource_type", "N/A"),
+                "service":       resource.get("service", "N/A"),
+                "provider":      (cloud.get("provider") or "").upper(),
+                "account_id":    cloud.get("account_id", "N/A"),
+                "account_name":  cloud.get("account_name", "N/A"),
+                "region":        cloud.get("region", "N/A"),
+                "rule_name":     eval_rule.get("name", "N/A"),
+                "severity":      severity,
+                "description":   eval_rule.get("description", ""),
+                "remediation":   eval_rule.get("remediation", ""),
+            })
 
     return result
 
