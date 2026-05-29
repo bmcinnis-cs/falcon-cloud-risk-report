@@ -4,7 +4,7 @@ import argparse
 import textwrap
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts
+from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages
 from fpdf import FPDF, XPos, YPos
 
 RISKS_FILTER = "status:'Open'+severity:'High'"
@@ -67,6 +67,7 @@ def interactive_config():
     config["include_risks"] = _prompt_yn("Include Cloud Risks", default=True)
     config["include_ioas"]  = _prompt_yn("Include Cloud IOA Detections", default=True)
     config["include_vms"]   = _prompt_yn("Include Unmanaged VMs", default=True)
+    config["include_ai_packages"] = _prompt_yn("Include AI Package Risks (Critical CVEs)", default=True)
     print()
 
     if config["include_risks"]:
@@ -112,9 +113,10 @@ def interactive_config():
 
 def _default_config():
     return {
-        "include_risks":   True,
-        "include_ioas":    True,
-        "include_vms":     True,
+        "include_risks":      True,
+        "include_ioas":       True,
+        "include_vms":        True,
+        "include_ai_packages": False,
         "severities":      ["High"],
         "status":          "Open",
         "risk_provider":   "all",
@@ -159,6 +161,8 @@ def _filter_desc(config):
     if config.get("include_vms"):
         vm_provs = config.get("vm_providers", ["AWS", "Azure", "GCP"])
         parts.append(f"VMs: {', '.join(vm_provs)}")
+    if config.get("include_ai_packages"):
+        parts.append("AI Packages: Critical CVEs")
     return "  |  ".join(parts)
 
 
@@ -245,6 +249,37 @@ def fetch_unmanaged_vms(sdk, filter_str):
             raise RuntimeError(f"get_assets failed: {r['body'].get('errors')}")
         assets.extend(r["body"].get("resources") or [])
     return assets
+
+
+def fetch_ai_critical_packages(sdk):
+    packages = []
+    after = None
+    while True:
+        params = {"filter": "ai_related:'true'", "limit": 200}
+        if after:
+            params["after"] = after
+        r = sdk.ReadPackagesCombined(**params)
+        if r["status_code"] != 200:
+            raise RuntimeError(f"ReadPackagesCombined failed: {r['body'].get('errors')}")
+        batch = r["body"].get("resources") or []
+        packages.extend(batch)
+        after = r["body"].get("meta", {}).get("pagination", {}).get("after")
+        if not batch or not after:
+            break
+
+    result = []
+    for pkg in packages:
+        critical = [v for v in (pkg.get("vulnerabilities") or [])
+                    if v.get("severity", "").lower() == "critical"]
+        if critical:
+            result.append({
+                "package_name_version": pkg.get("package_name_version", "N/A"),
+                "type":                 pkg.get("type", "N/A"),
+                "all_images":           pkg.get("all_images", 0),
+                "running_images":       pkg.get("running_images", 0),
+                "critical_vulnerabilities": critical,
+            })
+    return result
 
 
 # --- Terminal output ---
@@ -345,6 +380,38 @@ def print_vms(vm_data):
         print()
 
 
+def print_ai_packages(packages):
+    width = 64
+    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
+    print(f"{T_BOLD}{T_CYAN}  AI PACKAGE RISKS -- CRITICAL CVEs{T_RESET}")
+    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
+    print(f"  {t_label('Packages with Critical CVEs:')} {T_BOLD}{T_WHITE}{len(packages)}{T_RESET}")
+    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
+
+    if not packages:
+        print(f"\n  {T_YELLOW}No AI-related packages with Critical CVEs found.{T_RESET}\n")
+        return
+
+    for i, pkg in enumerate(packages, 1):
+        vulns = pkg["critical_vulnerabilities"]
+        print(f"\n  {T_BOLD}{T_WHITE}[{i} of {len(packages)}]{T_RESET}")
+        print(f"  {t_label('Package:  ')} {T_BOLD}{T_WHITE}{pkg['package_name_version']}{T_RESET}")
+        print(f"  {t_label('Type:     ')} {T_WHITE}{pkg['type']}{T_RESET}")
+        print(f"  {t_label('Images:   ')} {T_WHITE}{pkg['all_images']} total  |  {pkg['running_images']} running{T_RESET}")
+        print(f"  {t_label('Critical: ')} {T_BOLD}{T_RED}{len(vulns)} CVE(s){T_RESET}")
+        for v in vulns:
+            fix = v.get("fix_resolution") or []
+            fix_str = ", ".join(fix) if fix else "No fix available"
+            print(f"\n    {T_BOLD}{T_RED}{v['cveid']}{T_RESET}")
+            print(f"    {t_label('Fix:      ')} {T_YELLOW}{fix_str}{T_RESET}")
+            desc = (v.get("description") or "").strip()
+            if desc:
+                short = desc[:160].replace("\n", " ")
+                print(f"    {t_label('Desc:     ')} {T_DIM}{T_WHITE}{short}{'...' if len(desc) > 160 else ''}{T_RESET}")
+        print(f"\n  {T_GRAY}{'-' * (width - 2)}{T_RESET}")
+    print()
+
+
 # --- PDF ---
 
 class FalconReport(FPDF):
@@ -369,7 +436,8 @@ class FalconReport(FPDF):
         self.set_text_color(*MID_GRAY)
         self.cell(0, 8, f"Generated {now_utc()}  |  Page {self.page_no()}", align="C")
 
-    def cover(self, risks_count=None, ioas_count=None, vm_totals=None, filter_desc=""):
+    def cover(self, risks_count=None, ioas_count=None, vm_totals=None,
+              ai_packages_count=None, filter_desc=""):
         self.set_fill_color(*DARK)
         self.rect(0, 0, 210, 297, "F")
         self.set_y(80)
@@ -403,6 +471,13 @@ class FalconReport(FPDF):
                 self.set_text_color(*MID_GRAY)
                 self.cell(0, 7, f"Unmanaged Running VMs ({provider}):  {count}", align="C",
                           new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+        if ai_packages_count is not None:
+            self.set_font("Helvetica", "B", 10)
+            self.set_text_color(*LIGHT_GRAY)
+            self.cell(0, 8, f"AI Package Risks (Critical CVEs):  {ai_packages_count}", align="C",
+                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.ln(2)
 
         if filter_desc:
             self.ln(6)
@@ -611,8 +686,68 @@ class FalconReport(FPDF):
 
         self.ln(4)
 
+    def ai_package_card(self, i, total, pkg):
+        if self.get_y() > self.h - self.b_margin - 70:
+            self.add_page()
 
-def build_pdf(risks, ioas, vm_data, config):
+        self.set_fill_color(*DARK)
+        self.rect(self.l_margin, self.get_y(), self.epw, 10, "F")
+        self.set_font("Helvetica", "B", 9)
+        self.set_text_color(*WHITE)
+        self.set_x(self.l_margin)
+        self.cell(self.epw, 10,
+                  sanitize(f"  [{i} of {total}]  {pkg['package_name_version']}"),
+                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        self.ln(1)
+
+        vulns = pkg["critical_vulnerabilities"]
+        fields = [
+            ("Type",           pkg.get("type")),
+            ("All Images",     pkg.get("all_images", 0)),
+            ("Running Images", pkg.get("running_images", 0)),
+            ("Critical CVEs",  len(vulns)),
+        ]
+        for idx, (field, value) in enumerate(fields):
+            self.row(field, value, alt=idx % 2 == 0)
+        self.ln(3)
+
+        self.sub_header("Critical Vulnerabilities")
+        for vuln in vulns:
+            if self.get_y() > self.h - self.b_margin - 35:
+                self.add_page()
+
+            fix = vuln.get("fix_resolution") or []
+            fix_str = ", ".join(fix) if fix else "No fix available"
+
+            self.set_fill_color(*LIGHT_GRAY)
+            self.set_font("Helvetica", "B", 8)
+            self.set_text_color(*DARK)
+            self.set_x(self.l_margin)
+            self.cell(self.epw, 7, sanitize(f"  {vuln['cveid']}"),
+                      fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+            self.set_font("Helvetica", "B", 8)
+            self.set_text_color(*AMBER)
+            self.set_x(self.l_margin + 4)
+            self.cell(self.epw - 4, 6, sanitize(f"Fix: {fix_str}"),
+                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+            desc = (vuln.get("description") or "").strip()
+            if desc:
+                if self.get_y() > self.h - self.b_margin - 20:
+                    self.add_page()
+                self.set_font("Helvetica", "", 7.5)
+                self.set_text_color(*MID_GRAY)
+                self.set_x(self.l_margin + 4)
+                self.multi_cell(self.epw - 4, 5.5,
+                                sanitize(desc[:300] + ("..." if len(desc) > 300 else "")),
+                                new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.ln(2)
+
+        self._separator()
+
+
+def build_pdf(risks, ioas, vm_data, ai_packages, config):
     output_file = config.get("output_file", OUTPUT_FILE)
     vm_totals = {provider: len(assets) for provider, assets in vm_data.items()}
     fdesc = _filter_desc(config)
@@ -623,9 +758,10 @@ def build_pdf(risks, ioas, vm_data, config):
 
     pdf.add_page()
     pdf.cover(
-        risks_count=len(risks) if config.get("include_risks") else None,
-        ioas_count=len(ioas)   if config.get("include_ioas")  else None,
-        vm_totals=vm_totals    if config.get("include_vms")   else None,
+        risks_count=len(risks)             if config.get("include_risks")       else None,
+        ioas_count=len(ioas)               if config.get("include_ioas")        else None,
+        vm_totals=vm_totals                if config.get("include_vms")         else None,
+        ai_packages_count=len(ai_packages) if config.get("include_ai_packages") else None,
         filter_desc=fdesc,
     )
 
@@ -661,6 +797,18 @@ def build_pdf(risks, ioas, vm_data, config):
             pdf.sub_header(f"{provider}  -  {len(assets)} asset(s)")
             pdf.vm_table(assets)
 
+    if config.get("include_ai_packages"):
+        pdf.add_page()
+        pdf.section_header(f"AI Package Risks -- Critical CVEs  ({len(ai_packages)} packages)")
+        if not ai_packages:
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(*MID_GRAY)
+            pdf.cell(0, 8, "  No AI-related packages with Critical CVEs found.",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        else:
+            for i, pkg in enumerate(ai_packages, 1):
+                pdf.ai_package_card(i, len(ai_packages), pkg)
+
     pdf.output(output_file)
     print(f"Report written to {output_file}")
 
@@ -687,6 +835,7 @@ if __name__ == "__main__":
     cs     = CloudSecurity(auth_object=auth)
     csa    = CloudSecurityAssets(auth_object=auth)
     alerts = Alerts(auth_object=auth)
+    cp     = ContainerPackages(auth_object=auth)
 
     risks = []
     if config["include_risks"]:
@@ -708,6 +857,12 @@ if __name__ == "__main__":
             print(f"{T_DIM}  Found {len(assets)} asset(s) for {provider}.{T_RESET}")
             vm_data[provider] = assets
 
+    ai_packages = []
+    if config["include_ai_packages"]:
+        print(f"{T_DIM}Fetching AI-related packages...{T_RESET}")
+        ai_packages = fetch_ai_critical_packages(cp)
+        print(f"{T_DIM}  Found {len(ai_packages)} AI package(s) with Critical CVEs.{T_RESET}")
+
     print()
     if config["include_risks"]:
         print_risks(risks)
@@ -715,7 +870,9 @@ if __name__ == "__main__":
         print_cloud_ioas(ioas)
     if config["include_vms"]:
         print_vms(vm_data)
+    if config["include_ai_packages"]:
+        print_ai_packages(ai_packages)
 
     print(f"{T_DIM}Building PDF...{T_RESET}")
-    build_pdf(risks, ioas, vm_data, config)
+    build_pdf(risks, ioas, vm_data, ai_packages, config)
     print(f"{T_BOLD}{T_CYAN}PDF written to {config['output_file']}{T_RESET}")
