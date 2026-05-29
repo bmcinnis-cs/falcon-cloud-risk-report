@@ -3,6 +3,7 @@ import sys
 import json
 import argparse
 import textwrap
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections
@@ -558,34 +559,52 @@ def fetch_ioms(csd, categories):
     if not matching_ids:
         return []
 
-    # Step 2: fetch full details only for the matched IDs
-    result = []
-    for i in range(0, len(matching_ids), 100):
-        r2 = csd.get_iom_entities(ids=matching_ids[i:i + 100])
+    # Step 2: fetch full entity details in parallel batches
+    batches = [matching_ids[i:i + 100] for i in range(0, len(matching_ids), 100)]
+    total_batches = len(batches)
+    print(f"  {T_DIM}Fetching {len(matching_ids)} IOM entities in {total_batches} parallel batches...{T_RESET}",
+          flush=True)
+
+    def _fetch_batch(batch):
+        r2 = csd.get_iom_entities(ids=batch)
         dbg_response("get_iom_entities", r2)
         if r2["status_code"] != 200:
             raise RuntimeError(f"get_iom_entities failed: {r2['body'].get('errors')}")
-        for e in r2["body"].get("resources") or []:
-            eval_data = e.get("evaluation", {})
-            if eval_data.get("status") != "non-compliant":
-                continue
-            eval_rule = eval_data.get("rule", {})
-            cloud    = e.get("cloud", {})
-            resource = e.get("resource", {})
-            severity = (eval_data.get("severity") or "").capitalize() or "N/A"
-            result.append({
-                "resource_id":   resource.get("resource_id", "N/A"),
-                "resource_type": resource.get("resource_type_name") or resource.get("resource_type", "N/A"),
-                "service":       resource.get("service", "N/A"),
-                "provider":      (cloud.get("provider") or "").upper(),
-                "account_id":    cloud.get("account_id", "N/A"),
-                "account_name":  cloud.get("account_name", "N/A"),
-                "region":        cloud.get("region", "N/A"),
-                "rule_name":     eval_rule.get("name", "N/A"),
-                "severity":      severity,
-                "description":   eval_rule.get("description", ""),
-                "remediation":   eval_rule.get("remediation", ""),
-            })
+        return r2["body"].get("resources") or []
+
+    completed = 0
+    all_entities = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(_fetch_batch, b): b for b in batches}
+        for fut in as_completed(futures):
+            all_entities.extend(fut.result())
+            completed += 1
+            print(f"  {T_DIM}Fetching IOM details: {completed}/{total_batches} batches done...{T_RESET}",
+                  end="\r", flush=True)
+    print(flush=True)
+
+    result = []
+    for e in all_entities:
+        eval_data = e.get("evaluation", {})
+        if eval_data.get("status") != "non-compliant":
+            continue
+        eval_rule = eval_data.get("rule", {})
+        cloud    = e.get("cloud", {})
+        resource = e.get("resource", {})
+        severity = (eval_data.get("severity") or "").capitalize() or "N/A"
+        result.append({
+            "resource_id":   resource.get("resource_id", "N/A"),
+            "resource_type": resource.get("resource_type_name") or resource.get("resource_type", "N/A"),
+            "service":       resource.get("service", "N/A"),
+            "provider":      (cloud.get("provider") or "").upper(),
+            "account_id":    cloud.get("account_id", "N/A"),
+            "account_name":  cloud.get("account_name", "N/A"),
+            "region":        cloud.get("region", "N/A"),
+            "rule_name":     eval_rule.get("name", "N/A"),
+            "severity":      severity,
+            "description":   eval_rule.get("description", ""),
+            "remediation":   eval_rule.get("remediation", ""),
+        })
 
     return result
 
