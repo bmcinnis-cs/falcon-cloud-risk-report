@@ -4,7 +4,7 @@ import argparse
 import textwrap
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, CloudSecurityDetections
+from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, CloudSecurityDetections, CloudPolicies
 from fpdf import FPDF, XPos, YPos
 
 RISKS_FILTER = "status:'Open'+severity:'High'"
@@ -306,58 +306,67 @@ def fetch_ai_critical_packages(sdk, severities):
     return result
 
 
-def fetch_ai_ioms(csd):
-    rules = []
-    after = None
+def fetch_ai_ioms(cloud_policies, csd):
+    # Step 1: enumerate all CSPM policies and find AI-related ones by name
+    all_ids = []
+    offset = 0
     while True:
-        params = {"limit": 100}
-        if after:
-            params["after"] = after
-        r = csd.get_combined_iom_by_rule(**params)
+        r = cloud_policies.query_rule(limit=500, offset=offset)
         if r["status_code"] != 200:
-            raise RuntimeError(f"get_combined_iom_by_rule failed: {r['body'].get('errors')}")
-        batch = r["body"].get("resources") or []
-        rules.extend(batch)
-        after = r["body"].get("meta", {}).get("pagination", {}).get("after")
-        if not batch or not after:
+            raise RuntimeError(f"query_rule failed: {r['body'].get('errors')}")
+        ids = r["body"].get("resources") or []
+        all_ids.extend(ids)
+        total = r["body"].get("meta", {}).get("pagination", {}).get("total", 0)
+        offset += len(ids)
+        if offset >= total or not ids:
             break
 
-    ai_rules = [
-        rule for rule in rules
-        if any(kw in (rule.get("rule", {}).get("rule_name") or "").lower() for kw in AI_IOM_KEYWORDS)
+    policies = []
+    for i in range(0, len(all_ids), 500):
+        r = cloud_policies.get_rule(ids=all_ids[i:i + 500])
+        if r["status_code"] != 200:
+            continue
+        policies.extend(r["body"].get("resources") or [])
+
+    ai_policies = [
+        p for p in policies
+        if any(kw in (p.get("name") or "").lower() for kw in AI_IOM_KEYWORDS)
     ]
 
+    # Step 2: for each AI policy use its integer short_code as policy_id
+    # to query IOM entities — this is the correct parameter, not rule_id (UUID)
     result = []
-    for rule_rec in ai_rules:
-        rule_id   = rule_rec["rule"]["rule_id"]
-        rule_name = rule_rec["rule"].get("rule_name", "N/A")
-        severity  = rule_rec.get("severity", "N/A")
+    for policy in ai_policies:
+        policy_id = policy.get("short_code")
+        if not policy_id:
+            continue
+        policy_name = policy.get("name", "N/A")
+        policy_severity = policy.get("severity", "N/A")
 
         entity_ids = []
-        after2 = None
+        offset2 = 0
         while True:
-            p2 = {"rule_id": rule_id, "limit": 100}
-            if after2:
-                p2["after"] = after2
-            r2 = csd.query_iom_entities(**p2)
+            r2 = csd.query_iom_entities(policy_id=policy_id, limit=100, offset=offset2)
             if r2["status_code"] != 200:
                 break
             batch2 = r2["body"].get("resources") or []
             entity_ids.extend(batch2)
-            after2 = r2["body"].get("meta", {}).get("pagination", {}).get("after")
-            if not batch2 or not after2:
+            total2 = r2["body"].get("meta", {}).get("pagination", {}).get("total", 0)
+            offset2 += len(batch2)
+            if offset2 >= total2 or not batch2:
                 break
+
+        if not entity_ids:
+            continue
 
         for i in range(0, len(entity_ids), 100):
             r3 = csd.get_iom_entities(ids=entity_ids[i:i + 100])
             if r3["status_code"] != 200:
                 continue
             for e in r3["body"].get("resources") or []:
+                cloud     = e.get("cloud", {})
+                resource  = e.get("resource", {})
                 eval_rule = e.get("evaluation", {}).get("rule", {})
-                if eval_rule.get("id") != rule_id:
-                    continue
-                cloud    = e.get("cloud", {})
-                resource = e.get("resource", {})
                 result.append({
                     "resource_id":   resource.get("resource_id", "N/A"),
                     "resource_type": resource.get("resource_type_name") or resource.get("resource_type", "N/A"),
@@ -366,8 +375,8 @@ def fetch_ai_ioms(csd):
                     "account_id":    cloud.get("account_id", "N/A"),
                     "account_name":  cloud.get("account_name", "N/A"),
                     "region":        cloud.get("region", "N/A"),
-                    "rule_name":     rule_name,
-                    "severity":      severity,
+                    "rule_name":     eval_rule.get("name") or policy_name,
+                    "severity":      eval_rule.get("severity") or policy_severity,
                     "description":   eval_rule.get("description", ""),
                     "remediation":   eval_rule.get("remediation", ""),
                 })
@@ -1024,11 +1033,12 @@ if __name__ == "__main__":
         client_secret=os.environ["FALCON_CLIENT_SECRET"],
         base_url=os.environ.get("FALCON_BASE_URL", "https://api.crowdstrike.com"),
     )
-    cs     = CloudSecurity(auth_object=auth)
-    csa    = CloudSecurityAssets(auth_object=auth)
-    alerts = Alerts(auth_object=auth)
-    cp     = ContainerPackages(auth_object=auth)
-    csd    = CloudSecurityDetections(auth_object=auth)
+    cs              = CloudSecurity(auth_object=auth)
+    csa             = CloudSecurityAssets(auth_object=auth)
+    alerts          = Alerts(auth_object=auth)
+    cp              = ContainerPackages(auth_object=auth)
+    csd             = CloudSecurityDetections(auth_object=auth)
+    cloud_policies  = CloudPolicies(auth_object=auth)
 
     risks = []
     if config["include_risks"]:
@@ -1061,7 +1071,7 @@ if __name__ == "__main__":
     ai_ioms = []
     if config["include_ai_ioms"]:
         print(f"{T_DIM}Fetching AI cloud service IOMs...{T_RESET}")
-        ai_ioms = fetch_ai_ioms(csd)
+        ai_ioms = fetch_ai_ioms(cloud_policies, csd)
         print(f"{T_DIM}  Found {len(ai_ioms)} active misconfiguration(s).{T_RESET}")
 
     print()
