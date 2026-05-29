@@ -4,6 +4,7 @@ import json
 import argparse
 import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import quote
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections
@@ -817,25 +818,46 @@ def _arn_name(rid):
 
 
 def _falcon_iom_url(iom):
-    """Build a Falcon console deep-link for the given IOM entity."""
+    """Build a Falcon console deep-link for the given IOM entity.
+
+    URL format (reverse-engineered from working console URL):
+    /cloud-security/cspm/assessment/ng-configuration/{encoded_entity_id}/summary
+        ?filter=extension_status:'Unresolved'+resource_status:'active'
+               +severity:'{lower}'+rule_id:'{rule_uuid}'
+        &summaryTab=1&view=iom
+    """
+    entity_id = iom.get("entity_id", "")
+    if not entity_id:
+        return ""
+
     api_base = os.environ.get("FALCON_BASE_URL", "https://api.crowdstrike.com").rstrip("/")
-    # Map API base URL to Falcon console base URL
     import re as _re
-    if api_base in ("https://api.crowdstrike.com", "https://api.crowdstrike.com/"):
+    if api_base == "https://api.crowdstrike.com":
         console = "https://falcon.crowdstrike.com"
     else:
         m = _re.search(r"https://api\.([^/]+)\.crowdstrike\.com", api_base)
         console = f"https://{m.group(1)}.falcon.crowdstrike.com" if m else "https://falcon.crowdstrike.com"
-    acct   = iom.get("account_id", "")
-    region = iom.get("region", "")
-    # Build a filtered URL to the CSPM misconfigurations page
-    params = []
-    if acct and acct != "N/A":
-        params.append(f"account_id={acct}")
-    if region and region != "N/A":
-        params.append(f"region={region}")
-    qs = ("?" + "&".join(params)) if params else ""
-    return f"{console}/cloud-security/misconfigurations{qs}"
+
+    parts = entity_id.split("|")
+    rule_uuid = parts[-1] if len(parts) >= 7 else ""
+    severity  = (iom.get("severity") or "high").lower()
+
+    # Pipes encode as %7C; colons in resource_type stay bare
+    encoded_id = entity_id.replace("|", "%7C")
+
+    filter_str = (
+        f"extension_status:'Unresolved'"
+        f"+resource_status:'active'"
+        f"+severity:'{severity}'"
+        + (f"+rule_id:'{rule_uuid}'" if rule_uuid else "")
+    )
+    encoded_filter = quote(filter_str, safe="")
+
+    return (
+        f"{console}/cloud-security/cspm/assessment/ng-configuration"
+        f"/{encoded_id}/summary"
+        f"?filter={encoded_filter}&summaryTab=1&view=iom"
+    )
 
 
 def _console_url(iom):
