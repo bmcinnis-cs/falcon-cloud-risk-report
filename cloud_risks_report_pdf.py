@@ -370,17 +370,20 @@ def fetch_ai_ioms(cloud_policies, csd):
         dbg(f"querying policy_id={policy_id}  '{policy_name}'")
 
         entity_ids = []
-        offset2 = 0
+        after2 = None
         while True:
-            r2 = csd.query_iom_entities(policy_id=policy_id, limit=100, offset=offset2)
+            params2 = {"policy_id": policy_id, "limit": 100}
+            if after2:
+                params2["after"] = after2
+            r2 = csd.query_iom_entities(**params2)
             dbg_response(f"query_iom_entities(policy_id={policy_id})", r2)
             if r2["status_code"] != 200:
                 break
             batch2 = r2["body"].get("resources") or []
             entity_ids.extend(batch2)
-            total2 = r2["body"].get("meta", {}).get("pagination", {}).get("total", 0)
-            offset2 += len(batch2)
-            if offset2 >= total2 or not batch2:
+            after2 = r2["body"].get("meta", {}).get("pagination", {}).get("after")
+            dbg(f"  page: {len(batch2)} ids, after={after2!r}, total so far={len(entity_ids)}")
+            if not batch2 or not after2:
                 break
 
         dbg(f"  entity IDs found: {len(entity_ids)}")
