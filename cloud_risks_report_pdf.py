@@ -181,10 +181,37 @@ def _default_config():
     if os.path.exists(DEFAULTS_FILE):
         try:
             with open(DEFAULTS_FILE) as f:
-                return {**hardcoded, **json.load(f)}
+                saved = json.load(f)
+            saved = _sanitize_saved_config(saved)
+            return {**hardcoded, **saved}
         except Exception:
             pass
     return hardcoded
+
+
+def _sanitize_saved_config(cfg):
+    """Normalize and drop invalid values from a loaded .report_defaults.json."""
+    out = {}
+    bool_keys = ("include_risks", "include_ioas", "include_vms", "include_ai_packages", "include_ai_ioms")
+    for k in bool_keys:
+        if k in cfg:
+            out[k] = bool(cfg[k])
+    if "severities" in cfg:
+        out["severities"] = [s for s in cfg["severities"] if s in VALID_SEVERITIES] or ["High"]
+    if "status" in cfg:
+        val = str(cfg["status"]).capitalize()
+        out["status"] = val if val in ("Open", "Closed") else "all"
+    if "risk_provider" in cfg:
+        prov = str(cfg["risk_provider"]).lower()
+        out["risk_provider"] = prov if prov in VALID_PROVIDERS else "all"
+    if "ioa_severities" in cfg:
+        out["ioa_severities"] = [s for s in cfg["ioa_severities"] if s in VALID_SEVERITIES]
+    if "ai_package_severities" in cfg:
+        out["ai_package_severities"] = [s for s in cfg["ai_package_severities"] if s in VALID_SEVERITIES] or ["Critical"]
+    valid_vm = {"AWS", "Azure", "GCP"}
+    if "vm_providers" in cfg:
+        out["vm_providers"] = [p for p in cfg["vm_providers"] if p in valid_vm] or ["AWS", "Azure", "GCP"]
+    return out
 
 
 def _save_defaults(config):
@@ -264,9 +291,11 @@ def fetch_all_risks(sdk, filter_str):
             raise RuntimeError(f"combined_cloud_risks failed: {r['body'].get('errors')}")
         batch = r["body"].get("resources") or []
         risks.extend(batch)
-        total = r["body"].get("meta", {}).get("pagination", {}).get("total", 0)
+        if not batch:
+            break
+        total = r["body"].get("meta", {}).get("pagination", {}).get("total")
         offset += len(batch)
-        if not batch or offset >= total:
+        if total is not None and offset >= total:
             break
     return risks
 
@@ -368,6 +397,7 @@ def fetch_ai_ioms(csd):
     # most AI service rule UUIDs entirely.
     matching_ids = []
     after = None
+    page_num = 0
     while True:
         params = {"limit": 500}
         if after:
@@ -384,9 +414,13 @@ def fetch_ai_ioms(csd):
                 if any(kw in rt for kw in AI_IOM_RESOURCE_TYPES):
                     matching_ids.append(eid)
         after = r["body"].get("meta", {}).get("next")
-        dbg(f"  page: {len(page_ids)} ids, AI matches so far: {len(matching_ids)}")
+        page_num += 1
+        print(f"  {T_DIM}Scanning IOM page {page_num} ({len(matching_ids)} AI matches so far)...{T_RESET}",
+              end="\r", flush=True)
+        dbg(f"  page {page_num}: {len(page_ids)} ids, AI matches: {len(matching_ids)}, next={'...' if after else None}")
         if not page_ids or not after:
             break
+    print(flush=True)
 
     dbg(f"Total AI IOM entity IDs matched: {len(matching_ids)}")
     if not matching_ids:
@@ -398,7 +432,7 @@ def fetch_ai_ioms(csd):
         r2 = csd.get_iom_entities(ids=matching_ids[i:i + 100])
         dbg_response("get_iom_entities", r2)
         if r2["status_code"] != 200:
-            continue
+            raise RuntimeError(f"get_iom_entities failed: {r2['body'].get('errors')}")
         for e in r2["body"].get("resources") or []:
             eval_data = e.get("evaluation", {})
             if eval_data.get("status") != "non-compliant":
@@ -1072,12 +1106,17 @@ if __name__ == "__main__":
 
     load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
+    client_id     = os.environ.get("FALCON_CLIENT_ID")
+    client_secret = os.environ.get("FALCON_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        sys.exit("Error: FALCON_CLIENT_ID and FALCON_CLIENT_SECRET must be set in the environment or .env file.")
+
     config = interactive_config() if args.interactive else _default_config()
     risks_filter, vm_filters = build_filters(config)
 
     auth = OAuth2(
-        client_id=os.environ["FALCON_CLIENT_ID"],
-        client_secret=os.environ["FALCON_CLIENT_SECRET"],
+        client_id=client_id,
+        client_secret=client_secret,
         base_url=os.environ.get("FALCON_BASE_URL", "https://api.crowdstrike.com"),
     )
     cs              = CloudSecurity(auth_object=auth)
