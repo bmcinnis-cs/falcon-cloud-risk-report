@@ -893,7 +893,7 @@ class FalconReport(FPDF):
         self.set_font("Helvetica", "B", 11)
         self.set_text_color(*WHITE)
         self.set_x(self.l_margin)
-        self.cell(self.epw, 12, f"  {title}",
+        self.cell(self.epw, 12, sanitize(f"  {title}"),
                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         self.ln(3)
 
