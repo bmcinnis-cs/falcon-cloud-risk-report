@@ -1,4 +1,6 @@
 import os
+import sys
+import argparse
 import textwrap
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -12,6 +14,9 @@ VM_FILTERS = [
     ("GCP",   "managed_by:'Unmanaged'+cloud_provider:'gcp'+instance_state:'running'"),
 ]
 OUTPUT_FILE = "falcon_cloud_security_report.pdf"
+
+VALID_SEVERITIES = ["Critical", "High", "Medium", "Low", "Informational"]
+VALID_PROVIDERS  = ["aws", "azure", "gcp"]
 
 # PDF colors (R, G, B)
 CS_RED     = (227, 24,  55)
@@ -33,6 +38,130 @@ T_WHITE  = "\033[97m"
 T_GRAY   = "\033[90m"
 
 
+# --- Interactive configuration ---
+
+def _prompt(label, default=""):
+    display_default = f" [{default}]" if default else ""
+    try:
+        val = input(f"  {T_GRAY}{label}{display_default}:{T_RESET} {T_WHITE}").strip()
+        print(T_RESET, end="", flush=True)
+        return val if val else default
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+
+
+def _prompt_yn(label, default=True):
+    hint = "Y/n" if default else "y/N"
+    raw = _prompt(f"{label} ({hint})", "")
+    return raw.lower().startswith("y") if raw else default
+
+
+def interactive_config():
+    print(f"\n{T_BOLD}{T_CYAN}Falcon Cloud Security Report -- Configuration{T_RESET}")
+    print(f"{T_GRAY}Press Enter to accept defaults.{T_RESET}\n")
+
+    config = {}
+
+    print(f"  {T_BOLD}Sections{T_RESET}")
+    config["include_risks"] = _prompt_yn("Include Cloud Risks", default=True)
+    config["include_ioas"]  = _prompt_yn("Include Cloud IOA Detections", default=True)
+    config["include_vms"]   = _prompt_yn("Include Unmanaged VMs", default=True)
+    print()
+
+    if config["include_risks"]:
+        print(f"  {T_BOLD}Risk Filters{T_RESET}")
+        print(f"  {T_GRAY}Available severities: {', '.join(VALID_SEVERITIES)}{T_RESET}")
+        sev_raw = _prompt("Severity (comma-separated)", "High")
+        sevs = [s.strip().capitalize() for s in sev_raw.split(",") if s.strip()]
+        config["severities"] = [s for s in sevs if s in VALID_SEVERITIES] or ["High"]
+
+        status_raw = _prompt("Status (Open / Closed / All)", "Open")
+        config["status"] = status_raw.strip().capitalize() if status_raw.strip() else "Open"
+
+        prov_raw = _prompt("Cloud provider (aws / azure / gcp / all)", "all")
+        prov = prov_raw.strip().lower()
+        config["risk_provider"] = prov if prov in VALID_PROVIDERS else "all"
+        print()
+
+    if config["include_ioas"]:
+        print(f"  {T_BOLD}Cloud IOA Filters{T_RESET}")
+        ioa_sev_raw = _prompt("IOA severity filter (comma-separated, or all)", "all")
+        if not ioa_sev_raw.strip() or ioa_sev_raw.strip().lower() == "all":
+            config["ioa_severities"] = []
+        else:
+            sevs = [s.strip().capitalize() for s in ioa_sev_raw.split(",") if s.strip()]
+            config["ioa_severities"] = [s for s in sevs if s in VALID_SEVERITIES]
+        print()
+
+    if config["include_vms"]:
+        print(f"  {T_BOLD}VM Filters{T_RESET}")
+        print(f"  {T_GRAY}Available providers: AWS, Azure, GCP{T_RESET}")
+        vm_prov_raw = _prompt("VM providers (comma-separated)", "AWS,Azure,GCP")
+        _norm = {"aws": "AWS", "azure": "Azure", "gcp": "GCP"}
+        vm_provs = [p.strip() for p in vm_prov_raw.split(",") if p.strip()]
+        config["vm_providers"] = [_norm[p.lower()] for p in vm_provs if p.lower() in _norm] or ["AWS", "Azure", "GCP"]
+        print()
+
+    print(f"  {T_BOLD}Output{T_RESET}")
+    config["output_file"] = _prompt("Output filename", OUTPUT_FILE)
+    print()
+
+    return config
+
+
+def _default_config():
+    return {
+        "include_risks":   True,
+        "include_ioas":    True,
+        "include_vms":     True,
+        "severities":      ["High"],
+        "status":          "Open",
+        "risk_provider":   "all",
+        "ioa_severities":  [],
+        "vm_providers":    ["AWS", "Azure", "GCP"],
+        "output_file":     OUTPUT_FILE,
+    }
+
+
+def build_filters(config):
+    sevs = config.get("severities", ["High"])
+    if len(sevs) == 1:
+        sev_filter = f"severity:'{sevs[0]}'"
+    else:
+        joined = ",".join(f"'{s}'" for s in sevs)
+        sev_filter = f"severity:[{joined}]"
+
+    status = config.get("status", "Open")
+    risks_filter = sev_filter if status == "All" else f"status:'{status}'+{sev_filter}"
+
+    provider = config.get("risk_provider", "all")
+    if provider != "all":
+        risks_filter += f"+cloud_provider:'{provider}'"
+
+    vm_providers = config.get("vm_providers", ["AWS", "Azure", "GCP"])
+    vm_filters = [(p, f) for p, f in VM_FILTERS if p in vm_providers]
+
+    return risks_filter, vm_filters
+
+
+def _filter_desc(config):
+    parts = []
+    if config.get("include_risks"):
+        sevs = config.get("severities", ["High"])
+        status = config.get("status", "Open")
+        prov = config.get("risk_provider", "all")
+        parts.append(f"Risks: {', '.join(sevs)} severity / {status} status" +
+                     (f" / {prov.upper()}" if prov != "all" else ""))
+    if config.get("include_ioas"):
+        ioa_sevs = config.get("ioa_severities", [])
+        parts.append("IOAs: " + (", ".join(ioa_sevs) if ioa_sevs else "all severities"))
+    if config.get("include_vms"):
+        vm_provs = config.get("vm_providers", ["AWS", "Azure", "GCP"])
+        parts.append(f"VMs: {', '.join(vm_provs)}")
+    return "  |  ".join(parts)
+
+
 def now_utc():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -52,11 +181,11 @@ def sanitize(text):
 
 # --- Data fetching ---
 
-def fetch_all_risks(sdk):
+def fetch_all_risks(sdk, filter_str):
     risks = []
     offset = 0
     while True:
-        r = sdk.combined_cloud_risks(limit=1000, offset=offset, filter=RISKS_FILTER)
+        r = sdk.combined_cloud_risks(limit=1000, offset=offset, filter=filter_str)
         if r["status_code"] != 200:
             raise RuntimeError(f"combined_cloud_risks failed: {r['body'].get('errors')}")
         batch = r["body"].get("resources") or []
@@ -240,7 +369,7 @@ class FalconReport(FPDF):
         self.set_text_color(*MID_GRAY)
         self.cell(0, 8, f"Generated {now_utc()}  |  Page {self.page_no()}", align="C")
 
-    def cover(self, total_risks, total_ioas, vm_totals):
+    def cover(self, risks_count=None, ioas_count=None, vm_totals=None, filter_desc=""):
         self.set_fill_color(*DARK)
         self.rect(0, 0, 210, 297, "F")
         self.set_y(80)
@@ -254,21 +383,34 @@ class FalconReport(FPDF):
                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         self.ln(12)
 
-        self.set_font("Helvetica", "B", 10)
-        self.set_text_color(*LIGHT_GRAY)
-        self.cell(0, 8, f"Open High Severity Risks:  {total_risks}", align="C",
-                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-        self.ln(2)
-        self.set_font("Helvetica", "B", 10)
-        self.set_text_color(*LIGHT_GRAY)
-        self.cell(0, 8, f"Cloud IOA Detections:  {total_ioas}", align="C",
-                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-        self.ln(2)
-        for provider, count in vm_totals.items():
-            self.set_font("Helvetica", "", 9)
-            self.set_text_color(*MID_GRAY)
-            self.cell(0, 7, f"Unmanaged Running VMs ({provider}):  {count}", align="C",
+        if risks_count is not None:
+            self.set_font("Helvetica", "B", 10)
+            self.set_text_color(*LIGHT_GRAY)
+            self.cell(0, 8, f"Cloud Risks:  {risks_count}", align="C",
                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.ln(2)
+
+        if ioas_count is not None:
+            self.set_font("Helvetica", "B", 10)
+            self.set_text_color(*LIGHT_GRAY)
+            self.cell(0, 8, f"Cloud IOA Detections:  {ioas_count}", align="C",
+                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.ln(2)
+
+        if vm_totals:
+            for provider, count in vm_totals.items():
+                self.set_font("Helvetica", "", 9)
+                self.set_text_color(*MID_GRAY)
+                self.cell(0, 7, f"Unmanaged Running VMs ({provider}):  {count}", align="C",
+                          new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+        if filter_desc:
+            self.ln(6)
+            self.set_font("Helvetica", "", 8)
+            self.set_text_color(*MID_GRAY)
+            self.cell(0, 6, sanitize(f"Filters: {filter_desc}"), align="C",
+                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
         self.ln(10)
         self.set_font("Helvetica", "", 9)
         self.set_text_color(*MID_GRAY)
@@ -288,7 +430,6 @@ class FalconReport(FPDF):
         self.ln(3)
 
     def sub_header(self, title):
-        # Keep sub-header pinned to at least one following content row
         if self.get_y() > self.h - self.b_margin - 20:
             self.add_page()
         self.set_fill_color(*DARK)
@@ -302,12 +443,11 @@ class FalconReport(FPDF):
 
     def row(self, field, value, alt=False):
         text = sanitize(str(value or "N/A"))
-        # Estimate height: use average char width to guess line count
         self.set_font("Helvetica", "", 8)
         col_w = self.epw - self.LABEL_W
         char_w = self.get_string_width("m") or 2.5
         chars_per_line = max(1, int(col_w / char_w))
-        n_lines = max(1, -(-len(text) // chars_per_line))  # ceiling division
+        n_lines = max(1, -(-len(text) // chars_per_line))
         row_h = n_lines * 6 + 2
         if self.get_y() + row_h > self.h - self.b_margin:
             self.add_page()
@@ -329,7 +469,6 @@ class FalconReport(FPDF):
                         new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     def _separator(self):
-        # Guard against orphaned separator line at top of a new page
         if self.get_y() + 10 > self.h - self.b_margin:
             self.add_page()
         self.set_draw_color(*LIGHT_GRAY)
@@ -337,7 +476,6 @@ class FalconReport(FPDF):
         self.ln(8)
 
     def risk_card(self, i, total, risk):
-        # Guard for card header + 10 core field rows (title 10 + ln1 + 10×6 + ln3 ≈ 80 mm)
         if self.get_y() > self.h - self.b_margin - 80:
             self.add_page()
 
@@ -370,7 +508,6 @@ class FalconReport(FPDF):
         if risk_factors:
             self.sub_header("Risk Factors")
             for factor in risk_factors:
-                # Guard: factor name bar + at least one remediation title
                 if self.get_y() > self.h - self.b_margin - 30:
                     self.add_page()
                 self.set_fill_color(*LIGHT_GRAY)
@@ -380,7 +517,6 @@ class FalconReport(FPDF):
                 self.cell(self.epw, 7, sanitize(f"  {factor.get('insight_name', 'N/A')}"),
                           fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
                 for remediation in factor.get("remediation") or []:
-                    # Guard: remediation title + opening lines of content
                     if self.get_y() > self.h - self.b_margin - 25:
                         self.add_page()
                     self.set_font("Helvetica", "B", 8)
@@ -398,7 +534,6 @@ class FalconReport(FPDF):
         self._separator()
 
     def ioa_card(self, i, total, ioa):
-        # 12 fields × 6 mm + title(10) + ln(1) + ln(3) + separator+ln(8) ≈ 105 mm
         if self.get_y() > self.h - self.b_margin - 105:
             self.add_page()
 
@@ -477,55 +612,73 @@ class FalconReport(FPDF):
         self.ln(4)
 
 
-def build_pdf(risks, ioas, vm_data):
+def build_pdf(risks, ioas, vm_data, config):
+    output_file = config.get("output_file", OUTPUT_FILE)
     vm_totals = {provider: len(assets) for provider, assets in vm_data.items()}
+    fdesc = _filter_desc(config)
 
     pdf = FalconReport(orientation="P", unit="mm", format="A4")
     pdf.set_margins(10, 22, 10)
     pdf.set_auto_page_break(auto=True, margin=20)
 
-    # Cover
     pdf.add_page()
-    pdf.cover(len(risks), len(ioas), vm_totals)
+    pdf.cover(
+        risks_count=len(risks) if config.get("include_risks") else None,
+        ioas_count=len(ioas)   if config.get("include_ioas")  else None,
+        vm_totals=vm_totals    if config.get("include_vms")   else None,
+        filter_desc=fdesc,
+    )
 
-    # Risks section
-    pdf.add_page()
-    pdf.section_header(f"Open High Severity Risks  ({len(risks)} total)")
-    if not risks:
-        pdf.set_font("Helvetica", "", 9)
-        pdf.set_text_color(*MID_GRAY)
-        pdf.cell(0, 8, "  No risks found matching the filter.",
-                 new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    else:
-        for i, risk in enumerate(risks, 1):
-            pdf.risk_card(i, len(risks), risk)
+    if config.get("include_risks"):
+        pdf.add_page()
+        pdf.section_header(f"Cloud Risks  ({len(risks)} total)")
+        if not risks:
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(*MID_GRAY)
+            pdf.cell(0, 8, "  No risks found matching the filter.",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        else:
+            for i, risk in enumerate(risks, 1):
+                pdf.risk_card(i, len(risks), risk)
 
-    # Cloud IOAs section
-    pdf.add_page()
-    pdf.section_header(f"Cloud IOA Detections  ({len(ioas)} total)")
-    if not ioas:
-        pdf.set_font("Helvetica", "", 9)
-        pdf.set_text_color(*MID_GRAY)
-        pdf.cell(0, 8, "  No Cloud IOA detections found.",
-                 new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    else:
-        for i, ioa in enumerate(ioas, 1):
-            pdf.ioa_card(i, len(ioas), ioa)
+    if config.get("include_ioas"):
+        pdf.add_page()
+        pdf.section_header(f"Cloud IOA Detections  ({len(ioas)} total)")
+        if not ioas:
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(*MID_GRAY)
+            pdf.cell(0, 8, "  No Cloud IOA detections found.",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        else:
+            for i, ioa in enumerate(ioas, 1):
+                pdf.ioa_card(i, len(ioas), ioa)
 
-    # Unmanaged VMs section
-    pdf.add_page()
-    total_vms = sum(vm_totals.values())
-    pdf.section_header(f"Unmanaged Running VMs  ({total_vms} total)")
-    for provider, assets in vm_data.items():
-        pdf.sub_header(f"{provider}  -  {len(assets)} asset(s)")
-        pdf.vm_table(assets)
+    if config.get("include_vms"):
+        pdf.add_page()
+        total_vms = sum(vm_totals.values())
+        pdf.section_header(f"Unmanaged Running VMs  ({total_vms} total)")
+        for provider, assets in vm_data.items():
+            pdf.sub_header(f"{provider}  -  {len(assets)} asset(s)")
+            pdf.vm_table(assets)
 
-    pdf.output(OUTPUT_FILE)
-    print(f"Report written to {OUTPUT_FILE}")
+    pdf.output(output_file)
+    print(f"Report written to {output_file}")
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Falcon Cloud Security PDF Report")
+    parser.add_argument(
+        "-i", "--interactive",
+        action="store_true",
+        help="Prompt for report configuration (sections, filters, output filename)",
+    )
+    args = parser.parse_args()
+
     load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+    config = interactive_config() if args.interactive else _default_config()
+    risks_filter, vm_filters = build_filters(config)
+
     auth = OAuth2(
         client_id=os.environ["FALCON_CLIENT_ID"],
         client_secret=os.environ["FALCON_CLIENT_SECRET"],
@@ -535,26 +688,34 @@ if __name__ == "__main__":
     csa    = CloudSecurityAssets(auth_object=auth)
     alerts = Alerts(auth_object=auth)
 
-    print(f"\n{T_DIM}Fetching risks:  {RISKS_FILTER}{T_RESET}")
-    risks = fetch_all_risks(cs)
-    print(f"{T_DIM}  Found {len(risks)} risk(s).{T_RESET}\n")
+    risks = []
+    if config["include_risks"]:
+        print(f"\n{T_DIM}Fetching risks:  {risks_filter}{T_RESET}")
+        risks = fetch_all_risks(cs, risks_filter)
+        print(f"{T_DIM}  Found {len(risks)} risk(s).{T_RESET}\n")
 
-    print(f"{T_DIM}Fetching cloud IOAs...{T_RESET}")
-    ioas = fetch_cloud_ioas(alerts)
-    print(f"{T_DIM}  Found {len(ioas)} Cloud IOA(s).{T_RESET}\n")
+    ioas = []
+    if config["include_ioas"]:
+        print(f"{T_DIM}Fetching cloud IOAs...{T_RESET}")
+        ioas = fetch_cloud_ioas(alerts)
+        print(f"{T_DIM}  Found {len(ioas)} Cloud IOA(s).{T_RESET}\n")
 
     vm_data = {}
-    for provider, vm_filter in VM_FILTERS:
-        print(f"{T_DIM}Fetching VMs:    {vm_filter}{T_RESET}")
-        assets = fetch_unmanaged_vms(csa, vm_filter)
-        print(f"{T_DIM}  Found {len(assets)} asset(s) for {provider}.{T_RESET}")
-        vm_data[provider] = assets
+    if config["include_vms"]:
+        for provider, vm_filter in vm_filters:
+            print(f"{T_DIM}Fetching VMs:    {vm_filter}{T_RESET}")
+            assets = fetch_unmanaged_vms(csa, vm_filter)
+            print(f"{T_DIM}  Found {len(assets)} asset(s) for {provider}.{T_RESET}")
+            vm_data[provider] = assets
 
     print()
-    print_risks(risks)
-    print_cloud_ioas(ioas)
-    print_vms(vm_data)
+    if config["include_risks"]:
+        print_risks(risks)
+    if config["include_ioas"]:
+        print_cloud_ioas(ioas)
+    if config["include_vms"]:
+        print_vms(vm_data)
 
     print(f"{T_DIM}Building PDF...{T_RESET}")
-    build_pdf(risks, ioas, vm_data)
-    print(f"{T_BOLD}{T_CYAN}PDF written to {OUTPUT_FILE}{T_RESET}")
+    build_pdf(risks, ioas, vm_data, config)
+    print(f"{T_BOLD}{T_CYAN}PDF written to {config['output_file']}{T_RESET}")
