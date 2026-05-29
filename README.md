@@ -6,14 +6,15 @@
 
 ## What It Produces
 
-A single PDF with a cover page and up to three content sections — each togglable at runtime:
+A single PDF with a cover page and up to four content sections — each togglable at runtime:
 
 | Section | Content |
 |---|---|
 | **Cover page** | Active filter summary and counts for each included section |
 | **Cloud Risks** | Rule name, description, asset, account, region, and risk factors with remediation steps |
-| **Cloud IOA Detections** |  Event name, description, severity, MITRE tactic/technique, user, region, and timestamp |
+| **Cloud IOA Detections** | Event name, description, severity, MITRE tactic/technique, user, region, and timestamp |
 | **Unmanaged Running VMs** | Table of unmanaged, running VMs scoped to your selected cloud providers |
+| **AI Package Risks** | AI-related container packages with Critical CVEs — CVE ID, description, and recommended version bump fix |
 
 ---
 
@@ -27,6 +28,9 @@ A single PDF with a cover page and up to three content sections — each togglab
 | CSPM Registration | Read |
 | Cloud Security Assets | Read |
 | Alerts | Read |
+| Falcon Container Image | Read |
+
+> The **Falcon Container Image** scope is only required when the AI Package Risks section is enabled.
 
 ---
 
@@ -94,6 +98,7 @@ Press Enter to accept defaults.
   Include Cloud Risks (Y/n):
   Include Cloud IOA Detections (Y/n):
   Include Unmanaged VMs (Y/n):
+  Include AI Package Risks (Critical CVEs) (Y/n):
 
   Risk Filters
   Available severities: Critical, High, Medium, Low, Informational
@@ -119,6 +124,7 @@ Press Enter to accept defaults.
 | Include Cloud Risks | `y` / `n` | `y` |
 | Include Cloud IOA Detections | `y` / `n` | `y` |
 | Include Unmanaged VMs | `y` / `n` | `y` |
+| Include AI Package Risks | `y` / `n` | `y` (interactive) / `n` (default) |
 | Severity | `Critical`, `High`, `Medium`, `Low`, `Informational` (comma-separated) | `High` |
 | Status | `Open`, `Closed`, `All` | `Open` |
 | Cloud provider (risks) | `aws`, `azure`, `gcp`, `all` | `all` |
@@ -136,7 +142,7 @@ Running without `-i` uses these defaults and behaves the same as before interact
 
 | Setting | Default value |
 |---|---|
-| Sections | All included |
+| Sections | Risks, IOAs, VMs included; AI Packages excluded |
 | Severity | High |
 | Status | Open |
 | Cloud provider | All |
