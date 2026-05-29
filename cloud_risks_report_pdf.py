@@ -325,7 +325,6 @@ def fetch_ai_ioms(csd):
     ai_rules = [
         rule for rule in rules
         if any(kw in (rule.get("rule", {}).get("rule_name") or "").lower() for kw in AI_IOM_KEYWORDS)
-        and rule.get("misconfigurations", 0) > 0
     ]
 
     result = []
@@ -337,7 +336,7 @@ def fetch_ai_ioms(csd):
         entity_ids = []
         after2 = None
         while True:
-            p2 = {"rule_id": rule_id, "limit": 100, "status": "non-compliant"}
+            p2 = {"rule_id": rule_id, "limit": 100}
             if after2:
                 p2["after"] = after2
             r2 = csd.query_iom_entities(**p2)
