@@ -782,7 +782,7 @@ def print_ai_ioms(ioms):
     for i, iom in enumerate(ioms, 1):
         print(f"\n  {T_BOLD}{T_WHITE}[{i} of {len(ioms)}]{T_RESET}")
         print(f"  {t_label('Resource:     ')} {T_BOLD}{T_CYAN}{iom['resource_id']}{T_RESET}")
-        print(f"  {t_label('Type:         ')} {T_WHITE}{iom['resource_type']}{T_RESET}")
+        print(f"  {t_label('Type:         ')} {T_WHITE}{iom['resource_type']}{T_DIM}  [{iom.get('resource_type_raw', '')}]{T_RESET}")
         print(f"  {t_label('Service:      ')} {T_WHITE}{iom['service']}{T_RESET}")
         print(f"  {t_label('Provider:     ')} {T_BOLD}{T_WHITE}{iom['provider']}{T_RESET}")
         print(f"  {t_label('Account:      ')} {T_WHITE}{iom['account_name']}{T_GRAY} ({iom['account_id']}){T_RESET}")
@@ -887,7 +887,14 @@ def _console_url(iom):
         if "::iam::user"           in raw: return f"{b}/iam/home#/users/{_arn_name(rid)}"
         if "::iam::policy"         in raw: return f"{b}/iam/home#/policies/{rid}"
         if "::iam::group"          in raw: return f"{b}/iam/home#/groups/{_arn_name(rid)}"
-        if "::iam::"               in raw: return f"{b}/iam/home"
+        if "::iam::" in raw or raw == "aws::iam":
+            # Sub-type not recognised — try to infer from the resource ID ARN
+            rid_lower = rid.lower()
+            if ":role/" in rid_lower:    return f"{b}/iam/home#/roles/{_arn_name(rid)}"
+            if ":user/" in rid_lower:    return f"{b}/iam/home#/users/{_arn_name(rid)}"
+            if ":policy/" in rid_lower:  return f"{b}/iam/home#/policies/{rid}"
+            if ":group/" in rid_lower:   return f"{b}/iam/home#/groups/{_arn_name(rid)}"
+            return f"{b}/iam/home"
         if "::lambda::"            in raw: return f"{b}/lambda/home?region={region}#/functions/{_arn_name(rid)}"
         if "::rds::"               in raw: return f"{b}/rds/home?region={region}#database:id={rid}"
         if "::athena::"            in raw: return f"{b}/athena/home?region={region}"
