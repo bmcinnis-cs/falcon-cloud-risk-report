@@ -3,6 +3,7 @@ import sys
 import json
 import argparse
 import textwrap
+import html as _html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
 import re as _re
@@ -395,6 +396,43 @@ def sanitize(text):
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
+def _strip_html(text):
+    """Convert HTML-tagged API text to clean plain text.
+
+    Handles <br> → newline, strips all other tags, unescapes HTML entities.
+    <a href="url">label</a> keeps the label; if label differs from url, appends
+    the url in parentheses so the destination is still visible in the PDF.
+    """
+    if not text:
+        return text
+
+    # <br> variants → newline
+    text = _re.sub(r'<br\s*/?>', '\n', text, flags=_re.IGNORECASE)
+
+    # <a href="url">label</a>: keep label; append url when it adds information
+    def _repl_anchor(m):
+        href  = (m.group(1) or "").strip()
+        label = (m.group(2) or "").strip()
+        if label and href and label != href:
+            return f"{label} ({href})"
+        return label or href
+
+    text = _re.sub(
+        r'<a\s[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>',
+        _repl_anchor,
+        text,
+        flags=_re.IGNORECASE | _re.DOTALL,
+    )
+
+    # Strip remaining tags
+    text = _re.sub(r'<[^>]+>', '', text)
+
+    # Unescape HTML entities (&amp; → &, &lt; → <, &#39; → ', etc.)
+    text = _html.unescape(text)
+
+    return text
+
+
 # --- Data fetching ---
 
 def fetch_all_risks(sdk, filter_str):
@@ -638,8 +676,8 @@ def fetch_ioms(csd, categories, severities=None):
             "region":        cloud.get("region", "N/A"),
             "rule_name":     eval_rule.get("name", "N/A"),
             "severity":      severity,
-            "description":   eval_rule.get("description", ""),
-            "remediation":   eval_rule.get("remediation", ""),
+            "description":   _strip_html(eval_rule.get("description", "")),
+            "remediation":   _strip_html(eval_rule.get("remediation", "")),
         })
 
     if severities:
