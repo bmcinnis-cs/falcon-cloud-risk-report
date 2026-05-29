@@ -1058,7 +1058,6 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    global DEBUG
     DEBUG = args.debug
 
     load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
