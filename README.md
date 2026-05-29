@@ -1,40 +1,38 @@
 # Falcon Cloud Risk Report
 
-> Automated PDF report combining open high-severity risks, Cloud IOA detections, and unmanaged running VMs from [CrowdStrike Falcon Cloud Security](https://www.crowdstrike.com/platform/cloud-security/) using the [FalconPy SDK](https://github.com/CrowdStrike/falconpy).
+> Automated PDF report combining open cloud risks, Cloud IOA detections, and unmanaged running VMs from [CrowdStrike Falcon Cloud Security](https://www.crowdstrike.com/platform/cloud-security/) using the [FalconPy SDK](https://github.com/CrowdStrike/falconpy).
 
 ---
 
 ## What It Produces
 
-A single PDF (`falcon_cloud_security_report.pdf`) with four sections:
+A single PDF with a cover page and up to three content sections — each togglable at runtime:
 
-| Section | Description |
+| Section | Content |
 |---|---|
-| Cover page | Summary counts for risks, IOAs, and unmanaged VMs per cloud |
-| Open High Severity Risks | One card per finding — rule name, description, asset, account, region, risk factors with remediation steps |
-| Cloud IOA Detections | One card per detection — event name, description, severity, tactic/technique, user, region, timestamp |
-| Unmanaged Running VMs | Table of unmanaged, running VMs across AWS, Azure, and GCP |
+| **Cover page** | Active filter summary and counts for each included section |
+| **Cloud Risks** | One card per finding: rule name, description, asset, account, region, and risk factors with remediation steps |
+| **Cloud IOA Detections** | One card per detection: event name, description, severity, MITRE tactic/technique, user, region, and timestamp |
+| **Unmanaged Running VMs** | Table of unmanaged, running VMs scoped to your selected cloud providers |
 
 ---
 
 ## Prerequisites
 
 - Python 3.8+
-- CrowdStrike Falcon API client with the following scopes:
+- CrowdStrike Falcon API credentials with the following scopes:
 
-| Scope | Access |
+| Scope | Permission |
 |---|---|
-| **CSPM Registration** | Read |
-| **Cloud Security Assets** | Read |
-| **Alerts** | Read |
-
-See [docs/setup_guide.md](docs/setup_guide.md) for full step-by-step instructions.
+| CSPM Registration | Read |
+| Cloud Security Assets | Read |
+| Alerts | Read |
 
 ---
 
 ## Quick Start
 
-**1. Clone the repo**
+**1. Clone and enter the repo**
 
 ```bash
 git clone https://github.com/bmcinnis-cs/falcon-cloud-risk-report.git
@@ -53,8 +51,6 @@ python -m venv .venv
 | Windows (cmd) | `.venv\Scripts\activate.bat` |
 | Windows (PowerShell) | `.venv\Scripts\Activate.ps1` |
 
-You'll see `(.venv)` in your terminal prompt once active. Re-activate each time you open a new terminal.
-
 **3. Install dependencies**
 
 ```bash
@@ -67,7 +63,7 @@ pip install crowdstrike-falconpy python-dotenv fpdf2
 cp .env.example .env
 ```
 
-Edit `.env` and fill in your Client ID and Secret:
+Edit `.env` with your Falcon API credentials:
 
 ```ini
 FALCON_CLIENT_ID=your_client_id_here
@@ -77,27 +73,75 @@ FALCON_CLIENT_SECRET=your_client_secret_here
 **5. Run**
 
 ```bash
+# Default run — all sections, High severity, Open status
 python cloud_risks_report_pdf.py
-```
 
-The script prints progress to the terminal and writes `falcon_cloud_security_report.pdf` in the current directory.
+# Interactive mode — prompted for all options before fetching
+python cloud_risks_report_pdf.py -i
+```
 
 ---
 
-## Output
+## Interactive Mode
+
+Pass `-i` or `--interactive` to configure the report before any API calls are made. You will be stepped through each category — press **Enter** to accept the default shown in brackets.
 
 ```
-Fetching risks:  status:'Open'+severity:'High'
-  Found 42 risk(s).
+Falcon Cloud Security Report -- Configuration
+Press Enter to accept defaults.
 
-Fetching cloud IOAs...
-  Found 6 Cloud IOA(s).
+  Sections
+  Include Cloud Risks (Y/n):
+  Include Cloud IOA Detections (Y/n):
+  Include Unmanaged VMs (Y/n):
 
-Fetching VMs:    managed_by:'Unmanaged'+cloud_provider:'aws'+instance_state:'running'
-  Found 7 asset(s) for AWS.
-...
-PDF written to falcon_cloud_security_report.pdf
+  Risk Filters
+  Available severities: Critical, High, Medium, Low, Informational
+  Severity (comma-separated) [High]:
+  Status (Open / Closed / All) [Open]:
+  Cloud provider (aws / azure / gcp / all) [all]:
+
+  Cloud IOA Filters
+  IOA severity filter (comma-separated, or all) [all]:
+
+  VM Filters
+  Available providers: AWS, Azure, GCP
+  VM providers (comma-separated) [AWS,Azure,GCP]:
+
+  Output
+  Output filename [falcon_cloud_security_report.pdf]:
 ```
+
+### Available options
+
+| Prompt | Options | Default |
+|---|---|---|
+| Include Cloud Risks | `y` / `n` | `y` |
+| Include Cloud IOA Detections | `y` / `n` | `y` |
+| Include Unmanaged VMs | `y` / `n` | `y` |
+| Severity | `Critical`, `High`, `Medium`, `Low`, `Informational` (comma-separated) | `High` |
+| Status | `Open`, `Closed`, `All` | `Open` |
+| Cloud provider (risks) | `aws`, `azure`, `gcp`, `all` | `all` |
+| IOA severity filter | Any of the severities above, or `all` | `all` |
+| VM providers | `AWS`, `Azure`, `GCP` (comma-separated) | `AWS,Azure,GCP` |
+| Output filename | Any valid filename ending in `.pdf` | `falcon_cloud_security_report.pdf` |
+
+Sections excluded from the configuration are skipped entirely — no API calls are made for them and they do not appear in the PDF.
+
+---
+
+## Non-Interactive Defaults
+
+Running without `-i` uses these defaults and behaves the same as before interactive mode was added:
+
+| Setting | Default value |
+|---|---|
+| Sections | All included |
+| Severity | High |
+| Status | Open |
+| Cloud provider | All |
+| VM providers | AWS, Azure, GCP |
+| Output file | `falcon_cloud_security_report.pdf` |
 
 ---
 
