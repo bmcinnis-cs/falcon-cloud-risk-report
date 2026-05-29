@@ -95,6 +95,16 @@ def interactive_config():
             config["ioa_severities"] = [s for s in sevs if s in VALID_SEVERITIES]
         print()
 
+    if config["include_ai_packages"]:
+        print(f"  {T_BOLD}AI Package Filters{T_RESET}")
+        ai_sev_raw = _prompt("Package severity filter (comma-separated, or all)", "Critical")
+        if not ai_sev_raw.strip() or ai_sev_raw.strip().lower() == "all":
+            config["ai_package_severities"] = []
+        else:
+            sevs = [s.strip().capitalize() for s in ai_sev_raw.split(",") if s.strip()]
+            config["ai_package_severities"] = [s for s in sevs if s in VALID_SEVERITIES] or ["Critical"]
+        print()
+
     if config["include_vms"]:
         print(f"  {T_BOLD}VM Filters{T_RESET}")
         print(f"  {T_GRAY}Available providers: AWS, Azure, GCP{T_RESET}")
@@ -116,7 +126,8 @@ def _default_config():
         "include_risks":      True,
         "include_ioas":       True,
         "include_vms":        True,
-        "include_ai_packages": False,
+        "include_ai_packages":    False,
+        "ai_package_severities":  ["Critical"],
         "severities":      ["High"],
         "status":          "Open",
         "risk_provider":   "all",
@@ -162,7 +173,8 @@ def _filter_desc(config):
         vm_provs = config.get("vm_providers", ["AWS", "Azure", "GCP"])
         parts.append(f"VMs: {', '.join(vm_provs)}")
     if config.get("include_ai_packages"):
-        parts.append("AI Packages: Critical CVEs")
+        ai_sevs = config.get("ai_package_severities", ["Critical"])
+        parts.append("AI Packages: " + (", ".join(ai_sevs) if ai_sevs else "all severities"))
     return "  |  ".join(parts)
 
 
@@ -251,7 +263,8 @@ def fetch_unmanaged_vms(sdk, filter_str):
     return assets
 
 
-def fetch_ai_critical_packages(sdk):
+def fetch_ai_critical_packages(sdk, severities):
+    target = {s.lower() for s in severities} if severities else None
     packages = []
     after = None
     while True:
@@ -269,15 +282,15 @@ def fetch_ai_critical_packages(sdk):
 
     result = []
     for pkg in packages:
-        critical = [v for v in (pkg.get("vulnerabilities") or [])
-                    if v.get("severity", "").lower() == "critical"]
-        if critical:
+        matched = [v for v in (pkg.get("vulnerabilities") or [])
+                   if target is None or v.get("severity", "").lower() in target]
+        if matched:
             result.append({
                 "package_name_version": pkg.get("package_name_version", "N/A"),
                 "type":                 pkg.get("type", "N/A"),
                 "all_images":           pkg.get("all_images", 0),
                 "running_images":       pkg.get("running_images", 0),
-                "critical_vulnerabilities": critical,
+                "critical_vulnerabilities": matched,
             })
     return result
 
@@ -859,9 +872,11 @@ if __name__ == "__main__":
 
     ai_packages = []
     if config["include_ai_packages"]:
-        print(f"{T_DIM}Fetching AI-related packages...{T_RESET}")
-        ai_packages = fetch_ai_critical_packages(cp)
-        print(f"{T_DIM}  Found {len(ai_packages)} AI package(s) with Critical CVEs.{T_RESET}")
+        ai_sevs = config.get("ai_package_severities", ["Critical"])
+        sev_label = ", ".join(ai_sevs) if ai_sevs else "all severities"
+        print(f"{T_DIM}Fetching AI-related packages ({sev_label})...{T_RESET}")
+        ai_packages = fetch_ai_critical_packages(cp, ai_sevs)
+        print(f"{T_DIM}  Found {len(ai_packages)} AI package(s) matching filter.{T_RESET}")
 
     print()
     if config["include_risks"]:
