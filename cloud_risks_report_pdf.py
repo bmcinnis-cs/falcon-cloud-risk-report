@@ -4,7 +4,7 @@ import argparse
 import textwrap
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages
+from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, CloudSecurityDetections
 from fpdf import FPDF, XPos, YPos
 
 RISKS_FILTER = "status:'Open'+severity:'High'"
@@ -17,6 +17,13 @@ OUTPUT_FILE = "falcon_cloud_security_report.pdf"
 
 VALID_SEVERITIES = ["Critical", "High", "Medium", "Low", "Informational"]
 VALID_PROVIDERS  = ["aws", "azure", "gcp"]
+
+AI_IOM_KEYWORDS = [
+    "sagemaker", "bedrock", "rekognition", "comprehend",
+    "machine learning", "vertex", "ai platform", "cognitive",
+    "openai", "azure ai", "azure ml", "azure machine",
+    "ai service", "ai model", "generative", "llm",
+]
 
 # PDF colors (R, G, B)
 CS_RED     = (227, 24,  55)
@@ -68,6 +75,7 @@ def interactive_config():
     config["include_ioas"]  = _prompt_yn("Include Cloud IOA Detections", default=True)
     config["include_vms"]   = _prompt_yn("Include Unmanaged VMs", default=True)
     config["include_ai_packages"] = _prompt_yn("Include AI Package Risks (Critical CVEs)", default=True)
+    config["include_ai_ioms"]     = _prompt_yn("Include AI Cloud Services IOMs", default=True)
     print()
 
     if config["include_risks"]:
@@ -127,6 +135,7 @@ def _default_config():
         "include_ioas":       True,
         "include_vms":        True,
         "include_ai_packages":    False,
+        "include_ai_ioms":        False,
         "ai_package_severities":  ["Critical"],
         "severities":      ["High"],
         "status":          "Open",
@@ -175,6 +184,8 @@ def _filter_desc(config):
     if config.get("include_ai_packages"):
         ai_sevs = config.get("ai_package_severities", ["Critical"])
         parts.append("AI Packages: " + (", ".join(ai_sevs) if ai_sevs else "all severities"))
+    if config.get("include_ai_ioms"):
+        parts.append("AI Cloud IOMs: all AI service rules")
     return "  |  ".join(parts)
 
 
@@ -295,7 +306,94 @@ def fetch_ai_critical_packages(sdk, severities):
     return result
 
 
-# --- Terminal output ---
+def fetch_ai_ioms(csd):
+    rules = []
+    after = None
+    while True:
+        params = {"limit": 100}
+        if after:
+            params["after"] = after
+        r = csd.get_combined_iom_by_rule(**params)
+        if r["status_code"] != 200:
+            raise RuntimeError(f"get_combined_iom_by_rule failed: {r['body'].get('errors')}")
+        batch = r["body"].get("resources") or []
+        rules.extend(batch)
+        after = r["body"].get("meta", {}).get("pagination", {}).get("after")
+        if not batch or not after:
+            break
+
+    ai_rules = [
+        rule for rule in rules
+        if any(kw in (rule.get("rule", {}).get("rule_name") or "").lower() for kw in AI_IOM_KEYWORDS)
+    ]
+
+    result = []
+    for rule_rec in ai_rules:
+        rule_id   = rule_rec["rule"]["rule_id"]
+        rule_name = rule_rec["rule"].get("rule_name", "N/A")
+        severity  = rule_rec.get("severity", "N/A")
+        misconfigs = rule_rec.get("misconfigurations", 0)
+        assessed   = rule_rec.get("assessed_assets", 0)
+
+        entity_ids = []
+        after2 = None
+        while True:
+            p2 = {"rule_id": rule_id, "limit": 100, "status": "non-compliant"}
+            if after2:
+                p2["after"] = after2
+            r2 = csd.query_iom_entities(**p2)
+            if r2["status_code"] != 200:
+                break
+            batch2 = r2["body"].get("resources") or []
+            entity_ids.extend(batch2)
+            after2 = r2["body"].get("meta", {}).get("pagination", {}).get("after")
+            if not batch2 or not after2:
+                break
+
+        entities = []
+        for i in range(0, len(entity_ids), 100):
+            r3 = csd.get_iom_entities(ids=entity_ids[i:i + 100])
+            if r3["status_code"] != 200:
+                continue
+            for e in r3["body"].get("resources") or []:
+                if e.get("evaluation", {}).get("rule", {}).get("id") == rule_id:
+                    entities.append(e)
+
+        description = ""
+        remediation = ""
+        if entities:
+            eval_rule   = entities[0].get("evaluation", {}).get("rule", {})
+            description = eval_rule.get("description", "")
+            remediation = eval_rule.get("remediation", "")
+
+        assets = []
+        for e in entities:
+            cloud    = e.get("cloud", {})
+            resource = e.get("resource", {})
+            eval_d   = e.get("evaluation", {})
+            assets.append({
+                "resource_id":   resource.get("resource_id", "N/A"),
+                "resource_type": resource.get("resource_type_name") or resource.get("resource_type", "N/A"),
+                "service":       resource.get("service", "N/A"),
+                "provider":      cloud.get("provider", "N/A"),
+                "account_id":    cloud.get("account_id", "N/A"),
+                "account_name":  cloud.get("account_name", "N/A"),
+                "region":        cloud.get("region", "N/A"),
+                "status":        eval_d.get("status", "N/A"),
+            })
+
+        result.append({
+            "rule_id":          rule_id,
+            "rule_name":        rule_name,
+            "severity":         severity,
+            "misconfigurations": misconfigs,
+            "assessed_assets":  assessed,
+            "description":      description,
+            "remediation":      remediation,
+            "assets":           assets,
+        })
+
+    return result
 
 def t_label(text):
     return f"{T_GRAY}{text}{T_RESET}"
@@ -425,7 +523,46 @@ def print_ai_packages(packages):
     print()
 
 
-# --- PDF ---
+def print_ai_ioms(iom_rules):
+    width = 64
+    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
+    print(f"{T_BOLD}{T_CYAN}  AI CLOUD SERVICES -- IOM MISCONFIGURATIONS{T_RESET}")
+    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
+    total_v = sum(r.get("misconfigurations", 0) for r in iom_rules)
+    print(f"  {t_label('AI IOM rules found:')} {T_BOLD}{T_WHITE}{len(iom_rules)}{T_RESET}")
+    print(f"  {t_label('Total violations:  ')} {T_BOLD}{T_RED}{total_v}{T_RESET}")
+    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
+
+    if not iom_rules:
+        print(f"\n  {T_YELLOW}No AI-related IOM rules found.{T_RESET}\n")
+        return
+
+    for i, rule in enumerate(iom_rules, 1):
+        print(f"\n  {T_BOLD}{T_WHITE}[{i} of {len(iom_rules)}]{T_RESET}")
+        print(f"  {t_label('Rule:         ')} {T_BOLD}{T_WHITE}{rule['rule_name']}{T_RESET}")
+        print(f"  {t_label('Severity:     ')} {T_BOLD}{T_RED}{rule['severity']}{T_RESET}")
+        print(f"  {t_label('Violations:   ')} {T_BOLD}{T_RED}{rule['misconfigurations']}{T_RESET}")
+        print(f"  {t_label('Assessed:     ')} {T_WHITE}{rule['assessed_assets']}{T_RESET}")
+        if rule.get("description"):
+            desc = rule["description"][:160].replace("\n", " ")
+            print(f"  {t_label('Description:  ')} {T_WHITE}{desc}{T_RESET}")
+        if rule.get("assets"):
+            print(f"\n  {T_BOLD}{T_CYAN}  Violating Assets ({len(rule['assets'])}){T_RESET}")
+            for asset in rule["assets"]:
+                print(f"    {T_CYAN}{asset['resource_id']}{T_RESET}")
+                print(f"      {t_label('Type:')} {T_WHITE}{asset['resource_type']}{T_RESET}  "
+                      f"{t_label('Region:')} {T_WHITE}{asset['region']}{T_RESET}  "
+                      f"{t_label('Account:')} {T_WHITE}{asset['account_id']}{T_RESET}")
+        if rule.get("remediation"):
+            steps = rule["remediation"].split("|\n")
+            print(f"\n  {T_BOLD}{T_CYAN}  Remediation{T_RESET}")
+            for step in steps:
+                step = step.strip()
+                if step:
+                    for wrapped in textwrap.wrap(step, width=56) or [step]:
+                        print(f"    {T_DIM}{T_WHITE}{wrapped}{T_RESET}")
+        print(f"\n  {T_GRAY}{'-' * (width - 2)}{T_RESET}")
+    print()
 
 class FalconReport(FPDF):
     LABEL_W = 34
@@ -450,7 +587,7 @@ class FalconReport(FPDF):
         self.cell(0, 8, f"Generated {now_utc()}  |  Page {self.page_no()}", align="C")
 
     def cover(self, risks_count=None, ioas_count=None, vm_totals=None,
-              ai_packages_count=None, filter_desc=""):
+              ai_packages_count=None, ai_ioms_count=None, filter_desc=""):
         self.set_fill_color(*DARK)
         self.rect(0, 0, 210, 297, "F")
         self.set_y(80)
@@ -489,6 +626,13 @@ class FalconReport(FPDF):
             self.set_font("Helvetica", "B", 10)
             self.set_text_color(*LIGHT_GRAY)
             self.cell(0, 8, f"AI Package Risks (Critical CVEs):  {ai_packages_count}", align="C",
+                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.ln(2)
+
+        if ai_ioms_count is not None:
+            self.set_font("Helvetica", "B", 10)
+            self.set_text_color(*LIGHT_GRAY)
+            self.cell(0, 8, f"AI Cloud Services IOMs:  {ai_ioms_count}", align="C",
                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             self.ln(2)
 
@@ -760,7 +904,86 @@ class FalconReport(FPDF):
         self._separator()
 
 
-def build_pdf(risks, ioas, vm_data, ai_packages, config):
+    def ai_iom_card(self, i, total, rule):
+        if self.get_y() > self.h - self.b_margin - 80:
+            self.add_page()
+
+        self.set_fill_color(*DARK)
+        self.rect(self.l_margin, self.get_y(), self.epw, 10, "F")
+        self.set_font("Helvetica", "B", 9)
+        self.set_text_color(*WHITE)
+        self.set_x(self.l_margin)
+        self.cell(self.epw, 10,
+                  sanitize(f"  [{i} of {total}]  {rule['rule_name']}"),
+                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        self.ln(1)
+
+        fields = [
+            ("Severity",        rule.get("severity")),
+            ("Violations",      rule.get("misconfigurations", 0)),
+            ("Assessed Assets", rule.get("assessed_assets", 0)),
+            ("Description",     rule.get("description")),
+        ]
+        for idx, (field, value) in enumerate(fields):
+            self.row(field, value, alt=idx % 2 == 0)
+        self.ln(3)
+
+        assets = rule.get("assets") or []
+        if assets:
+            self.sub_header(f"Violating Assets  ({len(assets)})")
+            col1 = self.epw * 0.40
+            col2 = self.epw * 0.25
+            col3 = self.epw * 0.35
+
+            def _asset_header():
+                self.set_fill_color(*DARK)
+                self.set_font("Helvetica", "B", 7.5)
+                self.set_text_color(*WHITE)
+                self.set_x(self.l_margin)
+                self.cell(col1, 6.5, "  Resource ID", fill=True)
+                self.cell(col2, 6.5, "  Type", fill=True)
+                self.cell(col3, 6.5, "  Region / Account", fill=True,
+                          new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+            _asset_header()
+            for idx, asset in enumerate(assets):
+                if self.get_y() + 6.5 > self.h - self.b_margin:
+                    self.add_page()
+                    _asset_header()
+                rid = asset.get("resource_id", "N/A")
+                rid_d = rid if len(rid) <= 30 else rid[:27] + "..."
+                reg_acct = f"{asset.get('region', 'N/A')} / {asset.get('account_id', 'N/A')}"
+                self.set_fill_color(*(SECTION_BG if idx % 2 == 0 else WHITE))
+                self.set_font("Helvetica", "", 7)
+                self.set_text_color(*DARK)
+                self.set_x(self.l_margin)
+                self.cell(col1, 6.5, f"  {rid_d}", fill=True)
+                self.cell(col2, 6.5, f"  {sanitize(asset.get('resource_type', 'N/A'))}", fill=True)
+                self.cell(col3, 6.5, f"  {sanitize(reg_acct)}", fill=True,
+                          new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.ln(4)
+
+        remediation = (rule.get("remediation") or "").strip()
+        if remediation:
+            self.sub_header("Remediation")
+            steps = remediation.split("|\n")
+            for step in steps:
+                step = step.strip()
+                if not step:
+                    continue
+                if self.get_y() > self.h - self.b_margin - 20:
+                    self.add_page()
+                self.set_font("Helvetica", "", 7.5)
+                self.set_text_color(*MID_GRAY)
+                self.set_x(self.l_margin + 4)
+                self.multi_cell(self.epw - 4, 5.5, sanitize(step),
+                                new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                self.ln(1)
+
+        self._separator()
+
+
+def build_pdf(risks, ioas, vm_data, ai_packages, ai_ioms, config):
     output_file = config.get("output_file", OUTPUT_FILE)
     vm_totals = {provider: len(assets) for provider, assets in vm_data.items()}
     fdesc = _filter_desc(config)
@@ -775,6 +998,7 @@ def build_pdf(risks, ioas, vm_data, ai_packages, config):
         ioas_count=len(ioas)               if config.get("include_ioas")        else None,
         vm_totals=vm_totals                if config.get("include_vms")         else None,
         ai_packages_count=len(ai_packages) if config.get("include_ai_packages") else None,
+        ai_ioms_count=len(ai_ioms)         if config.get("include_ai_ioms")     else None,
         filter_desc=fdesc,
     )
 
@@ -822,6 +1046,18 @@ def build_pdf(risks, ioas, vm_data, ai_packages, config):
             for i, pkg in enumerate(ai_packages, 1):
                 pdf.ai_package_card(i, len(ai_packages), pkg)
 
+    if config.get("include_ai_ioms"):
+        pdf.add_page()
+        pdf.section_header(f"AI Cloud Services -- IOM Misconfigurations  ({len(ai_ioms)} rules)")
+        if not ai_ioms:
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(*MID_GRAY)
+            pdf.cell(0, 8, "  No AI-related IOM rules found.",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        else:
+            for i, rule in enumerate(ai_ioms, 1):
+                pdf.ai_iom_card(i, len(ai_ioms), rule)
+
     pdf.output(output_file)
     print(f"Report written to {output_file}")
 
@@ -849,6 +1085,7 @@ if __name__ == "__main__":
     csa    = CloudSecurityAssets(auth_object=auth)
     alerts = Alerts(auth_object=auth)
     cp     = ContainerPackages(auth_object=auth)
+    csd    = CloudSecurityDetections(auth_object=auth)
 
     risks = []
     if config["include_risks"]:
@@ -878,6 +1115,13 @@ if __name__ == "__main__":
         ai_packages = fetch_ai_critical_packages(cp, ai_sevs)
         print(f"{T_DIM}  Found {len(ai_packages)} AI package(s) matching filter.{T_RESET}")
 
+    ai_ioms = []
+    if config["include_ai_ioms"]:
+        print(f"{T_DIM}Fetching AI cloud service IOMs...{T_RESET}")
+        ai_ioms = fetch_ai_ioms(csd)
+        total_v = sum(r.get("misconfigurations", 0) for r in ai_ioms)
+        print(f"{T_DIM}  Found {len(ai_ioms)} AI IOM rule(s), {total_v} total violation(s).{T_RESET}")
+
     print()
     if config["include_risks"]:
         print_risks(risks)
@@ -887,7 +1131,9 @@ if __name__ == "__main__":
         print_vms(vm_data)
     if config["include_ai_packages"]:
         print_ai_packages(ai_packages)
+    if config["include_ai_ioms"]:
+        print_ai_ioms(ai_ioms)
 
     print(f"{T_DIM}Building PDF...{T_RESET}")
-    build_pdf(risks, ioas, vm_data, ai_packages, config)
+    build_pdf(risks, ioas, vm_data, ai_packages, ai_ioms, config)
     print(f"{T_BOLD}{T_CYAN}PDF written to {config['output_file']}{T_RESET}")
