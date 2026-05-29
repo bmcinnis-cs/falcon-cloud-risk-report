@@ -613,6 +613,7 @@ def fetch_ioms(csd, categories, severities=None):
         resource = e.get("resource", {})
         severity = (eval_data.get("severity") or "").capitalize() or "N/A"
         result.append({
+            "entity_id":         e.get("id", ""),
             "resource_id":       resource.get("resource_id", "N/A"),
             "resource_type":     resource.get("resource_type_name") or resource.get("resource_type", "N/A"),
             "resource_type_raw": resource.get("resource_type", "").lower(),
@@ -801,6 +802,42 @@ def print_ai_ioms(ioms):
         print(f"\n  {T_GRAY}{'-' * (width - 2)}{T_RESET}")
     print()
 
+def _arn_name(rid):
+    """Return the leaf name from an ARN, or rid unchanged if it isn't one.
+
+    arn:aws:iam::123456789012:role/my-role  →  my-role
+    arn:aws:iam::123456789012:policy/MyPolicy  →  MyPolicy
+    """
+    if rid.startswith("arn:"):
+        parts = rid.split(":")
+        if len(parts) >= 6:
+            last = parts[-1]          # e.g. "role/my-role"
+            return last.split("/")[-1] if "/" in last else last
+    return rid
+
+
+def _falcon_iom_url(iom):
+    """Build a Falcon console deep-link for the given IOM entity."""
+    api_base = os.environ.get("FALCON_BASE_URL", "https://api.crowdstrike.com").rstrip("/")
+    # Map API base URL to Falcon console base URL
+    import re as _re
+    if api_base in ("https://api.crowdstrike.com", "https://api.crowdstrike.com/"):
+        console = "https://falcon.crowdstrike.com"
+    else:
+        m = _re.search(r"https://api\.([^/]+)\.crowdstrike\.com", api_base)
+        console = f"https://{m.group(1)}.falcon.crowdstrike.com" if m else "https://falcon.crowdstrike.com"
+    acct   = iom.get("account_id", "")
+    region = iom.get("region", "")
+    # Build a filtered URL to the CSPM misconfigurations page
+    params = []
+    if acct and acct != "N/A":
+        params.append(f"account_id={acct}")
+    if region and region != "N/A":
+        params.append(f"region={region}")
+    qs = ("?" + "&".join(params)) if params else ""
+    return f"{console}/cloud-security/misconfigurations{qs}"
+
+
 def _console_url(iom):
     """Build a cloud console deep-link URL for the given IOM resource dict."""
     provider = (iom.get("provider") or "").upper()
@@ -824,22 +861,32 @@ def _console_url(iom):
         if "::ec2::networkacl"     in raw: return f"{b}/vpc/home?region={region}#acls:"
         if "::ec2::routetable"     in raw: return f"{b}/vpc/home?region={region}#RouteTables:"
         if "::s3::"                in raw: return f"https://s3.console.aws.amazon.com/s3/buckets/{rid}"
+        if "::iam::role"           in raw: return f"{b}/iam/home#/roles/{_arn_name(rid)}"
+        if "::iam::user"           in raw: return f"{b}/iam/home#/users/{_arn_name(rid)}"
+        if "::iam::policy"         in raw: return f"{b}/iam/home#/policies/{rid}"
+        if "::iam::group"          in raw: return f"{b}/iam/home#/groups/{_arn_name(rid)}"
         if "::iam::"               in raw: return f"{b}/iam/home"
-        if "::lambda::"            in raw: return f"{b}/lambda/home?region={region}#/functions/{rid}"
+        if "::lambda::"            in raw: return f"{b}/lambda/home?region={region}#/functions/{_arn_name(rid)}"
         if "::rds::"               in raw: return f"{b}/rds/home?region={region}#database:id={rid}"
         if "::athena::"            in raw: return f"{b}/athena/home?region={region}"
         if "::glue::"              in raw: return f"{b}/glue/home?region={region}"
+        if "::ecr::repository"     in raw: return f"{b}/ecr/repositories/private/{acct}/{rid}?region={region}"
         if "::ecr::"               in raw: return f"{b}/ecr/repositories?region={region}"
         if "::eks::"               in raw: return f"{b}/eks/home?region={region}#/clusters/{rid}"
+        if "::ecs::cluster"        in raw: return f"{b}/ecs/home?region={region}#/clusters/{rid}"
         if "::ecs::"               in raw: return f"{b}/ecs/home?region={region}"
         if "::eventbridge::"       in raw: return f"{b}/events/home?region={region}"
         if "::kms::"               in raw: return f"{b}/kms/home?region={region}#/kms/keys/{rid}"
-        if "::secretsmanager::"    in raw: return f"{b}/secretsmanager/home?region={region}#!/secret?name={rid}"
+        if "::secretsmanager::"    in raw: return f"{b}/secretsmanager/home?region={region}#!/secret?name={_arn_name(rid)}"
+        if "::sagemaker::notebookinstance" in raw: return f"{b}/sagemaker/home?region={region}#/notebook-instances/{rid}"
+        if "::sagemaker::model"    in raw: return f"{b}/sagemaker/home?region={region}#/models/{rid}"
+        if "::sagemaker::endpoint" in raw: return f"{b}/sagemaker/home?region={region}#/endpoints/{rid}"
         if "::sagemaker::"         in raw: return f"{b}/sagemaker/home?region={region}"
         if "::bedrock::"           in raw: return f"{b}/bedrock/home?region={region}"
         if "::cloudtrail::"        in raw: return f"{b}/cloudtrail/home?region={region}"
+        if "::cloudformation::stack" in raw: return f"{b}/cloudformation/home?region={region}#/stacks/stackinfo?stackId={rid}"
         if "::cloudformation::"    in raw: return f"{b}/cloudformation/home?region={region}"
-        if "::logs::loggroup"      in raw: return f"{b}/cloudwatch/home?region={region}#logsV2:log-groups"
+        if "::logs::loggroup"      in raw: return f"{b}/cloudwatch/home?region={region}#logsV2:log-groups/log-group/{rid}"
         if "::organizations::"     in raw: return f"{b}/organizations/v2/home"
         if "::account::"           in raw: return f"{b}/billing/home"
         return f"{b}/console/home?region={region}"
@@ -1278,6 +1325,9 @@ class FalconReport(FPDF):
             self.row(field, value, alt=idx % 2 == 0)
         if console_url:
             self.link_row("Console", console_url, alt=len(fields) % 2 == 0)
+        falcon_url = _falcon_iom_url(iom)
+        if falcon_url:
+            self.link_row("Falcon", falcon_url, alt=(len(fields) + (1 if console_url else 0)) % 2 == 0)
         self.ln(3)
 
         remediation = (iom.get("remediation") or "").strip()
