@@ -1,6 +1,6 @@
 # Falcon Cloud Risk Report
 
-> Automated PDF report combining open cloud risks, Cloud IOA detections, AI service misconfigurations, and unmanaged running VMs from [CrowdStrike Falcon Cloud Security](https://www.crowdstrike.com/platform/cloud-security/) using the [FalconPy SDK](https://github.com/CrowdStrike/falconpy).
+> Automated PDF report combining open cloud risks, Cloud IOA detections, AI package CVEs, cloud service misconfigurations, and unmanaged running VMs from [CrowdStrike Falcon Cloud Security](https://www.crowdstrike.com/platform/cloud-security/) using the [FalconPy SDK](https://github.com/CrowdStrike/falconpy).
 
 ---
 
@@ -13,8 +13,8 @@ A single PDF with a cover page and up to five content sections — each togglabl
 | **Cover page** | Active filter summary and counts for each included section |
 | **Cloud Risks** | Rule name, description, asset, account, region, and risk factors with remediation steps |
 | **Cloud IOA Detections** | Event name, description, severity, MITRE tactic/technique, user, region, and timestamp |
-| **AI Package Risks** | AI-related container packages with Critical CVEs — CVE ID, description, and recommended version bump fix |
-| **AI Cloud Services IOMs** | Active misconfigurations on AI service resources (SageMaker, Bedrock, Vertex AI, Azure ML, Azure OpenAI) with remediation guidance |
+| **AI Package Risks** | AI-related container packages with CVEs — CVE ID, description, fix version, and affected image names |
+| **Cloud Service IOMs** | Active misconfigurations filtered by service category and severity, with remediation steps, cloud console deep-links, and Falcon links |
 | **Unmanaged Running VMs** | Table of unmanaged, running VMs scoped to your selected cloud providers |
 
 ---
@@ -33,7 +33,7 @@ A single PDF with a cover page and up to five content sections — each togglabl
 | Cloud Security Detections | Read |
 
 > **Falcon Container Image** is only required when the AI Package Risks section is enabled.  
-> **Cloud Security Detections** is only required when the AI Cloud Services IOMs section is enabled.
+> **Cloud Security Detections** is only required when the Cloud Service IOMs section is enabled.
 
 ---
 
@@ -97,7 +97,7 @@ python cloud_risks_report_pdf.py -i -d
 
 ## Interactive Mode
 
-Pass `-i` or `--interactive` to configure the report before any API calls are made. You will be stepped through each category — press **Enter** to accept the default shown in brackets.
+Pass `-i` or `--interactive` to configure the report before any API calls are made. You will be stepped through each section — press **Enter** to accept the default shown in brackets.
 
 ```
 Falcon Cloud Security Report -- Configuration
@@ -108,52 +108,65 @@ Press Enter to accept defaults.
   Include Cloud IOA Detections (Y/n):
   Include Unmanaged VMs (Y/n):
   Include AI Package Risks (Critical CVEs) (Y/n):
-  Include AI Cloud Services IOMs (Y/n):
 
   Risk Filters
   Available severities: Critical, High, Medium, Low, Informational
   Severity (comma-separated) [High]:
-  Status (Open / Closed / all) [Open]:
-  Cloud provider (aws / azure / gcp / all) [all]:
+  Available statuses: Open, Closed, all
+  Status [Open]:
+  Available providers: aws, azure, gcp, all
+  Cloud provider [all]:
 
   Cloud IOA Filters
-  IOA severity filter (comma-separated, or all) [all]:
+  Available severities: Critical, High, Medium, Low, Informational, all
+  IOA severity (comma-separated, or all) [all]:
 
   AI Package Filters
-  Package severity filter (comma-separated, or all) [Critical]:
+  Available severities: Critical, High, Medium, Low, Informational, all
+  Package severity (comma-separated, or all) [Critical]:
 
   VM Filters
   Available providers: AWS, Azure, GCP
   VM providers (comma-separated) [AWS,Azure,GCP]:
+
+  IOM Filters
+  Available categories: account, ai, compute, containers, database, iam, networking, secrets, serverless, storage, all
+  Enter 'none' or leave blank to skip the IOM section.
+  IOM categories (comma-separated, all, or none) [none]:
+  Available severities: Critical, High, Medium, Low, Informational, all
+  IOM severity (comma-separated, or all) [all]:
 
   Output
   Output filename [falcon_cloud_security_report.pdf]:
   Save as new defaults (y/N):
 ```
 
-### Available options
+> The IOM severity prompt only appears when at least one category is selected.
 
-| Prompt | Options | Default |
+### Options reference
+
+| Prompt | Accepted values | Default |
 |---|---|---|
 | Include Cloud Risks | `y` / `n` | `y` |
 | Include Cloud IOA Detections | `y` / `n` | `y` |
 | Include Unmanaged VMs | `y` / `n` | `y` |
 | Include AI Package Risks | `y` / `n` | `y` (interactive) / `n` (non-interactive) |
-| Include AI Cloud Services IOMs | `y` / `n` | `y` (interactive) / `n` (non-interactive) |
-| Severity | `Critical`, `High`, `Medium`, `Low`, `Informational` (comma-separated) | `High` |
-| Status | `Open`, `Closed`, `all` | `Open` |
-| Cloud provider (risks) | `aws`, `azure`, `gcp`, `all` | `all` |
-| IOA severity filter | Any of the severities above, or `all` | `all` |
-| Package severity filter | Any of the severities above, or `all` | `Critical` |
+| Risk severity | `Critical`, `High`, `Medium`, `Low`, `Informational` (comma-separated) | `High` |
+| Risk status | `Open`, `Closed`, `all` | `Open` |
+| Risk cloud provider | `aws`, `azure`, `gcp`, `all` | `all` |
+| IOA severity | Any severity above, or `all` | `all` |
+| Package severity | Any severity above, or `all` | `Critical` |
 | VM providers | `AWS`, `Azure`, `GCP` (comma-separated) | `AWS,Azure,GCP` |
-| Output filename | Any valid filename ending in `.pdf` | `falcon_cloud_security_report.pdf` |
+| IOM categories | Any category below, comma-separated, `all`, or `none` | `none` |
+| IOM severity | Any severity above, or `all` | `all` |
+| Output filename | Any valid `.pdf` filename | `falcon_cloud_security_report.pdf` |
 | Save as new defaults | `y` / `n` | `n` |
 
 Sections excluded from the configuration are skipped entirely — no API calls are made for them and they do not appear in the PDF.
 
 ### Saving defaults
 
-Answering `y` at the **Save as new defaults** prompt writes your choices to `.report_defaults.json` in the script directory. On subsequent runs — interactive or not — those saved values replace the hardcoded defaults. The output filename is never saved, since it typically changes between runs.
+Answering `y` at the **Save as new defaults** prompt writes your choices to `.report_defaults.json` in the script directory. On subsequent runs — interactive or not — those saved values replace the hardcoded defaults. The output filename is never saved.
 
 To reset to factory defaults, delete `.report_defaults.json`.
 
@@ -161,32 +174,55 @@ To reset to factory defaults, delete `.report_defaults.json`.
 
 ## Non-Interactive Defaults
 
-Running without `-i` uses these defaults:
+Running without `-i` uses these defaults (or saved defaults from `.report_defaults.json`):
 
 | Setting | Default value |
 |---|---|
-| Sections | Risks, IOAs, VMs included; AI Packages and AI IOMs excluded |
-| Severity | High |
-| Status | Open |
-| Cloud provider | all |
+| Sections | Risks, IOAs, VMs included; AI Packages and IOMs excluded |
+| Risk severity | High |
+| Risk status | Open |
+| Risk cloud provider | all |
 | VM providers | AWS, Azure, GCP |
+| IOM categories | none (section skipped) |
+| IOM severity | all |
 | Output file | `falcon_cloud_security_report.pdf` |
-
-If `.report_defaults.json` exists (created via **Save as new defaults**), those values are used instead.
 
 ---
 
-## AI Cloud Services IOMs
+## Cloud Service IOMs
 
-The **AI Cloud Services IOMs** section surfaces active Indicators of Misconfiguration on AI service resources across all three cloud providers:
+The **Cloud Service IOMs** section surfaces active Indicators of Misconfiguration across your cloud environment, filtered by service category and severity. Only `non-compliant` evaluations are included.
 
-| Provider | Services covered |
+### Categories
+
+| Category | Resource types covered |
 |---|---|
-| AWS | SageMaker (notebook instances, endpoints, domains), Bedrock (custom models, agents, guardrails) |
-| GCP | Vertex AI (Workbench, Colab Enterprise runtime templates) |
-| Azure | Machine Learning workspaces and compute, OpenAI / Cognitive Services |
+| `compute` | EC2 instances, volumes, images, snapshots, EIPs, Auto Scaling, GCP Compute instances and disks |
+| `networking` | Security groups, VPCs, subnets, network ACLs, route tables, load balancers, GCP networks and firewalls |
+| `iam` | AWS IAM roles, users, policies, groups; GCP IAM |
+| `storage` | S3 buckets, GCP Storage, Artifact Registry |
+| `database` | RDS, Athena, Glue |
+| `containers` | ECR, EKS, ECS, GCP GKE |
+| `serverless` | Lambda, EventBridge, GCP Pub/Sub |
+| `ai` | SageMaker, Bedrock, GCP Vertex AI, Azure Machine Learning, Azure Cognitive Services |
+| `secrets` | KMS, Secrets Manager, GCP Secret Manager |
+| `account` | AWS Account, CloudFormation, CloudTrail, CloudWatch Logs, AWS Organizations |
+| `all` | All of the above |
 
-Each finding shows the misconfigured resource, cloud account, region, severity, and the remediation steps from the IOM rule. Only `non-compliant` evaluations are included.
+Use comma-separated values to combine categories — for example, `iam, compute` returns misconfigurations across both service groups.
+
+### Severity filter
+
+An optional severity filter reduces results to `Critical`, `High`, `Medium`, `Low`, or any combination. Leave it as `all` to include every severity.
+
+Filtering by severity is applied client-side after fetching entity details. For broad category selections (e.g. `compute, iam, storage`) this can still involve fetching thousands of entity IDs — the script parallelises the detail fetches across 8 threads to keep wall time manageable.
+
+### Links in the PDF
+
+Each IOM card in the PDF includes two clickable links:
+
+- **Console** — a direct deep-link to the specific resource in the AWS console, GCP console, or Azure portal. For AWS, the link resolves to the exact resource (e.g. an EC2 instance, IAM role by name, S3 bucket, RDS instance). For IAM resources where the resource ID is an ARN, the leaf name is extracted automatically.
+- **Falcon** — a direct link to the finding in the Falcon CSPM console, pre-filtered by severity and rule ID.
 
 ---
 
