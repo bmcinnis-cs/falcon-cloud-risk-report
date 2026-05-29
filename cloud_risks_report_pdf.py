@@ -4,7 +4,7 @@ import argparse
 import textwrap
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, CloudSecurityDetections, CloudPolicies
+from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, CloudSecurityDetections
 from fpdf import FPDF, XPos, YPos
 
 RISKS_FILTER = "status:'Open'+severity:'High'"
@@ -17,12 +17,13 @@ OUTPUT_FILE = "falcon_cloud_security_report.pdf"
 
 VALID_SEVERITIES = ["Critical", "High", "Medium", "Low", "Informational"]
 VALID_PROVIDERS  = ["aws", "azure", "gcp"]
+SEVERITY_MAP     = {0: "Informational", 1: "Low", 2: "Medium", 3: "High", 4: "Critical"}
 
 AI_IOM_KEYWORDS = [
     "sagemaker", "bedrock", "rekognition", "comprehend",
     "machine learning", "vertex", "ai platform", "cognitive",
     "openai", "azure ai", "azure ml", "azure machine",
-    "ai service", "ai model", "generative", "llm",
+    "ai service", "ai model", "generative", "llm", "notebook",
 ]
 
 # PDF colors (R, G, B)
@@ -144,7 +145,7 @@ def interactive_config():
     config["output_file"] = _prompt("Output filename", OUTPUT_FILE)
     print()
 
-    return config
+    return {**_default_config(), **config}
 
 
 def _default_config():
@@ -242,11 +243,19 @@ def fetch_all_risks(sdk, filter_str):
     return risks
 
 
-def fetch_cloud_ioas(sdk):
+def fetch_cloud_ioas(sdk, ioa_severities=None):
+    fql = "type:'cloud-ioa'"
+    if ioa_severities:
+        if len(ioa_severities) == 1:
+            fql += f"+severity_name:'{ioa_severities[0]}'"
+        else:
+            joined = ",".join(f"'{s}'" for s in ioa_severities)
+            fql += f"+severity_name:[{joined}]"
+
     ids = []
     after = None
     while True:
-        params = {"limit": 1000, "filter": "type:'cloud-ioa'"}
+        params = {"limit": 1000, "filter": fql}
         if after:
             params["after"] = after
         r = sdk.query_alerts_v2(**params)
@@ -324,95 +333,57 @@ def fetch_ai_critical_packages(sdk, severities):
     return result
 
 
-def fetch_ai_ioms(cloud_policies, csd):
-    # Step 1: enumerate all CSPM policies and find AI-related ones by name
-    all_ids = []
-    offset = 0
+def fetch_ai_ioms(csd):
+    # query_iom_entities filter params are not reliably applied server-side —
+    # fetch all IOM entity IDs once and filter client-side by rule name keywords
+    entity_ids = []
+    after = None
     while True:
-        dbg(f"query_rule offset={offset}")
-        r = cloud_policies.query_rule(limit=500, offset=offset)
-        dbg_response("query_rule", r)
+        params = {"limit": 100}
+        if after:
+            params["after"] = after
+        r = csd.query_iom_entities(**params)
+        dbg_response("query_iom_entities", r)
         if r["status_code"] != 200:
-            raise RuntimeError(f"query_rule failed: {r['body'].get('errors')}")
-        ids = r["body"].get("resources") or []
-        all_ids.extend(ids)
-        total = r["body"].get("meta", {}).get("pagination", {}).get("total", 0)
-        offset += len(ids)
-        if offset >= total or not ids:
+            raise RuntimeError(f"query_iom_entities failed: {r['body'].get('errors')}")
+        batch = r["body"].get("resources") or []
+        entity_ids.extend(batch)
+        after = r["body"].get("meta", {}).get("pagination", {}).get("after")
+        dbg(f"  page: {len(batch)} ids, after={after!r}, total so far={len(entity_ids)}")
+        if not batch or not after:
             break
 
-    dbg(f"total policy IDs: {len(all_ids)}")
+    dbg(f"Total IOM entity IDs: {len(entity_ids)}")
 
-    policies = []
-    for i in range(0, len(all_ids), 500):
-        dbg(f"get_rule batch {i}–{i+500}")
-        r = cloud_policies.get_rule(ids=all_ids[i:i + 500])
-        dbg_response("get_rule", r)
-        if r["status_code"] != 200:
-            continue
-        policies.extend(r["body"].get("resources") or [])
-
-    ai_policies = [
-        p for p in policies
-        if any(kw in (p.get("name") or "").lower() for kw in AI_IOM_KEYWORDS)
-    ]
-    dbg(f"AI policies matched: {len(ai_policies)}")
-
-    # Step 2: for each AI policy use its integer short_code as policy_id
-    # to query IOM entities — this is the correct parameter, not rule_id (UUID)
     result = []
-    for policy in ai_policies:
-        policy_id = policy.get("short_code")
-        if not policy_id:
+    for i in range(0, len(entity_ids), 100):
+        dbg(f"get_iom_entities batch {i}–{i+100}")
+        r2 = csd.get_iom_entities(ids=entity_ids[i:i + 100])
+        dbg_response("get_iom_entities", r2)
+        if r2["status_code"] != 200:
             continue
-        policy_name = policy.get("name", "N/A")
-        policy_severity = policy.get("severity", "N/A")
-        dbg(f"querying policy_id={policy_id}  '{policy_name}'")
-
-        entity_ids = []
-        after2 = None
-        while True:
-            params2 = {"policy_id": policy_id, "limit": 100}
-            if after2:
-                params2["after"] = after2
-            r2 = csd.query_iom_entities(**params2)
-            dbg_response(f"query_iom_entities(policy_id={policy_id})", r2)
-            if r2["status_code"] != 200:
-                break
-            batch2 = r2["body"].get("resources") or []
-            entity_ids.extend(batch2)
-            after2 = r2["body"].get("meta", {}).get("pagination", {}).get("after")
-            dbg(f"  page: {len(batch2)} ids, after={after2!r}, total so far={len(entity_ids)}")
-            if not batch2 or not after2:
-                break
-
-        dbg(f"  entity IDs found: {len(entity_ids)}")
-        if not entity_ids:
-            continue
-
-        for i in range(0, len(entity_ids), 100):
-            dbg(f"  get_iom_entities batch {i}–{i+100}")
-            r3 = csd.get_iom_entities(ids=entity_ids[i:i + 100])
-            dbg_response("get_iom_entities", r3)
-            if r3["status_code"] != 200:
+        for e in r2["body"].get("resources") or []:
+            eval_rule = e.get("evaluation", {}).get("rule", {})
+            rule_name = eval_rule.get("name", "")
+            if not any(kw in rule_name.lower() for kw in AI_IOM_KEYWORDS):
                 continue
-            for e in r3["body"].get("resources") or []:
-                cloud     = e.get("cloud", {})
-                resource  = e.get("resource", {})
-                eval_rule = e.get("evaluation", {}).get("rule", {})
-                result.append({
-                    "resource_id":   resource.get("resource_id", "N/A"),
-                    "resource_type": resource.get("resource_type_name") or resource.get("resource_type", "N/A"),
-                    "service":       resource.get("service", "N/A"),
-                    "provider":      (cloud.get("provider") or "").upper(),
-                    "account_id":    cloud.get("account_id", "N/A"),
-                    "account_name":  cloud.get("account_name", "N/A"),
-                    "region":        cloud.get("region", "N/A"),
-                    "rule_name":     eval_rule.get("name") or policy_name,
-                    "severity":      eval_rule.get("severity") or policy_severity,
-                    "description":   eval_rule.get("description", ""),
-                    "remediation":   eval_rule.get("remediation", ""),
-                })
+            cloud    = e.get("cloud", {})
+            resource = e.get("resource", {})
+            sev_raw  = eval_rule.get("severity")
+            severity = SEVERITY_MAP.get(sev_raw, str(sev_raw)) if sev_raw is not None else "N/A"
+            result.append({
+                "resource_id":   resource.get("resource_id", "N/A"),
+                "resource_type": resource.get("resource_type_name") or resource.get("resource_type", "N/A"),
+                "service":       resource.get("service", "N/A"),
+                "provider":      (cloud.get("provider") or "").upper(),
+                "account_id":    cloud.get("account_id", "N/A"),
+                "account_name":  cloud.get("account_name", "N/A"),
+                "region":        cloud.get("region", "N/A"),
+                "rule_name":     rule_name,
+                "severity":      severity,
+                "description":   eval_rule.get("description", ""),
+                "remediation":   eval_rule.get("remediation", ""),
+            })
 
     return result
 
@@ -534,7 +505,7 @@ def print_ai_packages(packages):
         for v in vulns:
             fix = v.get("fix_resolution") or []
             fix_str = ", ".join(fix) if fix else "No fix available"
-            print(f"\n    {T_BOLD}{T_RED}{v['cveid']}{T_RESET}")
+            print(f"\n    {T_BOLD}{T_RED}{v.get('cveid', 'N/A')}{T_RESET}")
             print(f"    {t_label('Fix:      ')} {T_YELLOW}{fix_str}{T_RESET}")
             desc = (v.get("description") or "").strip()
             if desc:
@@ -896,7 +867,7 @@ class FalconReport(FPDF):
             self.set_font("Helvetica", "B", 8)
             self.set_text_color(*DARK)
             self.set_x(self.l_margin)
-            self.cell(self.epw, 7, sanitize(f"  {vuln['cveid']}"),
+            self.cell(self.epw, 7, sanitize(f"  {vuln.get('cveid', 'N/A')}"),
                       fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
             self.set_font("Helvetica", "B", 8)
@@ -1078,7 +1049,6 @@ if __name__ == "__main__":
     alerts          = Alerts(auth_object=auth)
     cp              = ContainerPackages(auth_object=auth)
     csd             = CloudSecurityDetections(auth_object=auth)
-    cloud_policies  = CloudPolicies(auth_object=auth)
 
     risks = []
     if config["include_risks"]:
@@ -1089,7 +1059,7 @@ if __name__ == "__main__":
     ioas = []
     if config["include_ioas"]:
         print(f"{T_DIM}Fetching cloud IOAs...{T_RESET}")
-        ioas = fetch_cloud_ioas(alerts)
+        ioas = fetch_cloud_ioas(alerts, config.get("ioa_severities", []))
         print(f"{T_DIM}  Found {len(ioas)} Cloud IOA(s).{T_RESET}\n")
 
     vm_data = {}
@@ -1111,7 +1081,7 @@ if __name__ == "__main__":
     ai_ioms = []
     if config["include_ai_ioms"]:
         print(f"{T_DIM}Fetching AI cloud service IOMs...{T_RESET}")
-        ai_ioms = fetch_ai_ioms(cloud_policies, csd)
+        ai_ioms = fetch_ai_ioms(csd)
         print(f"{T_DIM}  Found {len(ai_ioms)} active misconfiguration(s).{T_RESET}")
 
     print()
