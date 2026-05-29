@@ -5,6 +5,7 @@ import argparse
 import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
+import re as _re
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections
@@ -275,10 +276,14 @@ def _default_config():
         try:
             with open(DEFAULTS_FILE) as f:
                 saved = json.load(f)
+            if not isinstance(saved, dict):
+                raise ValueError("defaults file is not a JSON object")
             saved = _sanitize_saved_config(saved)
             return {**hardcoded, **saved}
-        except Exception:
-            pass
+        except (OSError, PermissionError) as exc:
+            print(f"{T_YELLOW}Warning: could not read {DEFAULTS_FILE}: {exc}{T_RESET}", file=sys.stderr)
+        except Exception as exc:
+            print(f"{T_YELLOW}Warning: ignoring malformed {DEFAULTS_FILE}: {exc}{T_RESET}", file=sys.stderr)
     return hardcoded
 
 
@@ -317,9 +322,13 @@ def _sanitize_saved_config(cfg):
 
 
 def _save_defaults(config):
+    # output_file is intentionally excluded — it's a per-run setting, not a persistent preference
     to_save = {k: v for k, v in config.items() if k != "output_file"}
-    with open(DEFAULTS_FILE, "w") as f:
-        json.dump(to_save, f, indent=2)
+    try:
+        with open(DEFAULTS_FILE, "w") as f:
+            json.dump(to_save, f, indent=2)
+    except OSError as exc:
+        print(f"{T_YELLOW}Warning: could not save defaults to {DEFAULTS_FILE}: {exc}{T_RESET}", file=sys.stderr)
 
 
 def build_filters(config):
@@ -482,6 +491,7 @@ def fetch_images_for_package(ci, package_name_version):
             params["after"] = after
         r = ci.ReadCombinedImagesExport(**params)
         if r["status_code"] != 200:
+            dbg_response("ReadCombinedImagesExport", r)
             break
         batch = r["body"].get("resources") or []
         for img in batch:
@@ -598,7 +608,10 @@ def fetch_ioms(csd, categories, severities=None):
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(_fetch_batch, b): b for b in batches}
         for fut in as_completed(futures):
-            all_entities.extend(fut.result())
+            try:
+                all_entities.extend(fut.result())
+            except Exception as exc:
+                print(f"\n  {T_YELLOW}Warning: IOM batch fetch failed — {exc}{T_RESET}", flush=True)
             completed += 1
             print(f"  {T_DIM}Fetching IOM details: {completed}/{total_batches} batches done...{T_RESET}",
                   end="\r", flush=True)
@@ -813,7 +826,8 @@ def _arn_name(rid):
         parts = rid.split(":")
         if len(parts) >= 6:
             last = parts[-1]          # e.g. "role/my-role"
-            return last.split("/")[-1] if "/" in last else last
+            name = last.split("/")[-1] if "/" in last else last
+            return name or rid        # guard against trailing-slash ARNs
     return rid
 
 
@@ -831,15 +845,18 @@ def _falcon_iom_url(iom):
         return ""
 
     api_base = os.environ.get("FALCON_BASE_URL", "https://api.crowdstrike.com").rstrip("/")
-    import re as _re
     if api_base == "https://api.crowdstrike.com":
         console = "https://falcon.crowdstrike.com"
     else:
         m = _re.search(r"https://api\.([^/]+)\.crowdstrike\.com", api_base)
-        console = f"https://{m.group(1)}.falcon.crowdstrike.com" if m else "https://falcon.crowdstrike.com"
+        if m:
+            console = f"https://{m.group(1)}.falcon.crowdstrike.com"
+        else:
+            dbg(f"[_falcon_iom_url] unrecognised base URL {api_base!r}; defaulting to US-1 console")
+            console = "https://falcon.crowdstrike.com"
 
     parts = entity_id.split("|")
-    rule_uuid = parts[-1] if len(parts) >= 7 else ""
+    rule_uuid = parts[6] if len(parts) >= 7 else ""   # index 6 is always the rule UUID
     severity  = (iom.get("severity") or "high").lower()
 
     # Pipes encode as %7C; colons in resource_type stay bare
@@ -875,13 +892,13 @@ def _console_url(iom):
         if "::ec2::snapshot"       in raw: return f"{b}/ec2/v2/home?region={region}#Snapshots:snapshotId={rid}"
         if "::ec2::volume"         in raw: return f"{b}/ec2/v2/home?region={region}#Volumes:volumeId={rid}"
         if "::ec2::image"          in raw: return f"{b}/ec2/v2/home?region={region}#Images:imageId={rid}"
-        if "::ec2::eip"            in raw: return f"{b}/ec2/v2/home?region={region}#Addresses:"
-        if "::autoscaling::"       in raw: return f"{b}/ec2/v2/home?region={region}#AutoScalingGroups"
-        if "::elasticloadbalancing" in raw: return f"{b}/ec2/v2/home?region={region}#LoadBalancers"
-        if "::ec2::vpc"            in raw: return f"{b}/vpc/home?region={region}"
-        if "::ec2::subnet"         in raw: return f"{b}/vpc/home?region={region}#subnets:"
-        if "::ec2::networkacl"     in raw: return f"{b}/vpc/home?region={region}#acls:"
-        if "::ec2::routetable"     in raw: return f"{b}/vpc/home?region={region}#RouteTables:"
+        if "::ec2::eip"            in raw: return f"{b}/ec2/v2/home?region={region}#Addresses:AllocationId={rid}"
+        if "::autoscaling::"       in raw: return f"{b}/ec2/v2/home?region={region}#AutoScalingGroups:id={rid};view=details"
+        if "::elasticloadbalancing" in raw: return f"{b}/ec2/v2/home?region={region}#LoadBalancers:search={rid};sort=loadBalancerName"
+        if "::ec2::vpc"            in raw: return f"{b}/vpc/home?region={region}#vpcs:VpcId={rid}"
+        if "::ec2::subnet"         in raw: return f"{b}/vpc/home?region={region}#subnets:SubnetId={rid}"
+        if "::ec2::networkacl"     in raw: return f"{b}/vpc/home?region={region}#acls:AclId={rid}"
+        if "::ec2::routetable"     in raw: return f"{b}/vpc/home?region={region}#RouteTables:RouteTableId={rid}"
         if "::s3::"                in raw: return f"https://s3.console.aws.amazon.com/s3/buckets/{rid}"
         if "::iam::role"           in raw: return f"{b}/iam/home#/roles/{_arn_name(rid)}"
         if "::iam::user"           in raw: return f"{b}/iam/home#/users/{_arn_name(rid)}"
@@ -912,12 +929,12 @@ def _console_url(iom):
         if "::sagemaker::endpoint" in raw: return f"{b}/sagemaker/home?region={region}#/endpoints/{rid}"
         if "::sagemaker::"         in raw: return f"{b}/sagemaker/home?region={region}"
         if "::bedrock::"           in raw: return f"{b}/bedrock/home?region={region}"
-        if "::cloudtrail::"        in raw: return f"{b}/cloudtrail/home?region={region}"
+        if "::cloudtrail::"        in raw: return f"{b}/cloudtrail/home?region={region}#/trails/{rid}" if rid and rid != "N/A" else f"{b}/cloudtrail/home?region={region}#/trails"
         if "::cloudformation::stack" in raw: return f"{b}/cloudformation/home?region={region}#/stacks/stackinfo?stackId={rid}"
         if "::cloudformation::"    in raw: return f"{b}/cloudformation/home?region={region}"
-        if "::logs::loggroup"      in raw: return f"{b}/cloudwatch/home?region={region}#logsV2:log-groups/log-group/{rid}"
+        if "::logs::loggroup"      in raw: return f"{b}/cloudwatch/home?region={region}#logsV2:log-groups/log-group/{quote(rid, safe='')}"
         if "::organizations::"     in raw: return f"{b}/organizations/v2/home"
-        if "::account::"           in raw: return f"{b}/billing/home"
+        if "::account::"           in raw: return f"{b}/account/home"
         return f"{b}/console/home?region={region}"
 
     if provider == "GCP":
@@ -1457,7 +1474,7 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
 
     if iom_cats:
         pdf.add_page()
-        section_title = f"Cloud Service IOMs  ({len(ioms)} total)  —  {ioms_label}"
+        section_title = f"Cloud Service IOMs  ({len(ioms)} total)  -  {ioms_label}"
         pdf.section_header(section_title)
         if not ioms:
             pdf.set_font("Helvetica", "", 9)
