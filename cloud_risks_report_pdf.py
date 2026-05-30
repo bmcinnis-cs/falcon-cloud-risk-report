@@ -13,8 +13,12 @@ from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, Contain
 from fpdf import FPDF, XPos, YPos
 
 RISKS_FILTER = "status:'Open'+severity:'High'"
-# Updated VM approach: Use Hosts API instead of CloudSecurityAssets for accurate sensor data
-VM_PROVIDERS = ["AWS", "Azure", "GCP"]  # Simplified - no filters needed for Hosts API
+# Updated VM approach: Use CloudSecurityAssets with exact Asset Explorer filters
+VM_FILTERS = [
+    ("AWS",   "active:'true'+cloud_provider:'aws'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
+    ("Azure", "active:'true'+cloud_provider:'azure'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
+    ("GCP",   "active:'true'+cloud_provider:'gcp'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
+]
 def get_default_output_filename():
     """Generate a default output filename with timestamp"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -169,7 +173,7 @@ def interactive_config():
     print(f"  {T_BOLD}Sections{T_RESET}")
     config["include_risks"] = _prompt_yn("Include Cloud Risks", default=True)
     config["include_ioas"]  = _prompt_yn("Include Cloud IOA Detections", default=True)
-    config["include_vms"]   = _prompt_yn("Include VMs without Falcon Sensor", default=True)
+    config["include_vms"]   = _prompt_yn("Include Unmanaged Virtual Machines", default=True)
     config["include_ai_packages"] = _prompt_yn("Include AI Package Risks (Critical CVEs)", default=True)
     print()
 
@@ -349,10 +353,11 @@ def build_filters(config):
     if provider != "all":
         risks_filter += f"+cloud_provider:'{provider}'"
 
-    # Updated: Return VM providers instead of filters (Hosts API doesn't use these filters)
+    # Use exact Asset Explorer VM filters
     vm_providers = config.get("vm_providers", ["AWS", "Azure", "GCP"])
+    vm_filters = [(p, f) for p, f in VM_FILTERS if p in vm_providers]
 
-    return risks_filter, vm_providers
+    return risks_filter, vm_filters
 
 
 def _filter_desc(config):
@@ -1247,7 +1252,7 @@ class FalconReport(FPDF):
             for provider, count in vm_totals.items():
                 self.set_font("Helvetica", "", 9)
                 self.set_text_color(*MID_GRAY)
-                self.cell(0, 7, f"VMs without Falcon Sensor ({provider}):  {count}", align="C",
+                self.cell(0, 7, f"Unmanaged Virtual Machines ({provider}):  {count}", align="C",
                           new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
         if ai_packages_count is not None:
@@ -1463,7 +1468,7 @@ class FalconReport(FPDF):
         if not assets:
             self.set_font("Helvetica", "", 8)
             self.set_text_color(*MID_GRAY)
-            self.cell(0, 8, "  No VMs without sensor found.", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.cell(0, 8, "  No unmanaged virtual machines found.", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             self.ln(2)
             return
 
@@ -1474,8 +1479,8 @@ class FalconReport(FPDF):
             self.set_font("Helvetica", "B", 8)
             self.set_text_color(*WHITE)
             self.set_x(self.l_margin)
-            self.cell(col_w, 7, "  Hostname", fill=True)
-            self.cell(col_w, 7, "  Sensor Status", fill=True,
+            self.cell(col_w, 7, "  Resource ID", fill=True)
+            self.cell(col_w, 7, "  Account ID", fill=True,
                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
         _table_header()
@@ -1485,19 +1490,19 @@ class FalconReport(FPDF):
                 self.add_page()
                 _table_header()
 
-            # Handle both old (CloudSecurityAssets) and new (Hosts API) data structures
-            hostname = asset.get("hostname") or asset.get("asset_name") or asset.get("resource_name", "N/A")
-            sensor_status = asset.get("sensor_version", "No Sensor")
+            # Use original CloudSecurityAssets data structure
+            rid = asset.get("resource_id") or asset.get("id", "N/A")
+            account_id = asset.get("account_id", "N/A")
 
-            # Truncate long hostnames for display
-            hostname_display = hostname if len(hostname) <= 45 else hostname[:42] + "..."
+            # Truncate long resource IDs for display
+            rid_display = rid if len(rid) <= 45 else rid[:42] + "..."
 
             self.set_fill_color(*(SECTION_BG if idx % 2 == 0 else WHITE))
             self.set_font("Helvetica", "", 7.5)
             self.set_text_color(*DARK)
             self.set_x(self.l_margin)
-            self.cell(col_w, 6.5, f"  {hostname_display}", fill=True)
-            self.cell(col_w, 6.5, f"  {sensor_status}", fill=True,
+            self.cell(col_w, 6.5, f"  {rid_display}", fill=True)
+            self.cell(col_w, 6.5, f"  {account_id}", fill=True,
                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
         self.ln(4)
@@ -1723,7 +1728,7 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
     if config.get("include_vms"):
         pdf.add_page()
         total_vms = sum(vm_totals.values())
-        pdf.section_header(f"VMs without Falcon Sensor  ({total_vms} total)")
+        pdf.section_header(f"Unmanaged Virtual Machines  ({total_vms} total)")
         for provider, assets in vm_data.items():
             pdf.sub_header(f"{provider}  -  {len(assets)} asset(s)")
             pdf.vm_table(assets)
@@ -1757,7 +1762,7 @@ if __name__ == "__main__":
         sys.exit("Error: FALCON_CLIENT_ID and FALCON_CLIENT_SECRET must be set in the environment or .env file.")
 
     config = interactive_config() if args.interactive else _default_config()
-    risks_filter, vm_providers = build_filters(config)
+    risks_filter, vm_filters = build_filters(config)
 
     auth = OAuth2(
         client_id=client_id,
@@ -1770,7 +1775,6 @@ if __name__ == "__main__":
     cp              = ContainerPackages(auth_object=auth)
     ci              = ContainerImages(auth_object=auth)
     csd             = CloudSecurityDetections(auth_object=auth)
-    hosts           = Hosts(auth_object=auth)  # Added for VM sensor detection
 
     risks = []
     if config["include_risks"]:
@@ -1786,11 +1790,10 @@ if __name__ == "__main__":
 
     vm_data = {}
     if config["include_vms"]:
-        for provider in vm_providers:
-            print(f"{T_DIM}Fetching VMs without sensor for {provider}...{T_RESET}")
-            # Use comprehensive approach to find VMs (both Hosts API and CloudSecurityAssets)
-            assets = fetch_cloud_vms_comprehensive(hosts, csa, provider.lower())
-            print(f"{T_DIM}  Found {len(assets)} VM(s) without Falcon sensor for {provider}.{T_RESET}")
+        for provider, vm_filter in vm_filters:
+            print(f"{T_DIM}Fetching VMs:    {vm_filter}{T_RESET}")
+            assets = fetch_unmanaged_vms(csa, vm_filter)
+            print(f"{T_DIM}  Found {len(assets)} unmanaged Virtual Machine(s) for {provider}.{T_RESET}")
             vm_data[provider] = assets
 
     ai_packages = []
