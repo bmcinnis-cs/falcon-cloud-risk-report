@@ -521,7 +521,7 @@ def fetch_unmanaged_vms(sdk, filter_str):
 def fetch_vms_without_sensor(hosts_sdk, cloud_provider):
     """
     Fetch VMs without CrowdStrike Falcon sensor for a specific cloud provider.
-    Uses the Hosts API to find cloud VMs that don't have the sensor installed.
+    Uses the Hosts API with proper service_provider field identification.
 
     Args:
         hosts_sdk: Hosts API SDK instance
@@ -534,12 +534,29 @@ def fetch_vms_without_sensor(hosts_sdk, cloud_provider):
     offset = 0
     batch_size = 1000
 
-    print(f"    Scanning all hosts for {cloud_provider} VMs...")
+    # Map cloud provider names to service_provider field values
+    service_provider_mapping = {
+        'aws': 'AWS',
+        'azure': 'AZURE',
+        'gcp': 'GCP'
+    }
 
-    # Query ALL hosts and filter them client-side for better accuracy
+    target_provider = service_provider_mapping.get(cloud_provider.lower())
+    if not target_provider:
+        print(f"    Warning: Unknown cloud provider '{cloud_provider}'")
+        return []
+
+    print(f"    Querying hosts with service_provider:'{target_provider}'...")
+
     while True:
         try:
-            r = hosts_sdk.query_devices_by_filter(limit=batch_size, offset=offset)
+            # Use proper API filter for service provider
+            r = hosts_sdk.query_devices_by_filter(
+                limit=batch_size,
+                offset=offset,
+                filter=f"service_provider:'{target_provider}'"
+            )
+
             if r["status_code"] != 200:
                 dbg_response("query_devices_by_filter", r)
                 break
@@ -548,7 +565,7 @@ def fetch_vms_without_sensor(hosts_sdk, cloud_provider):
             if not batch_ids:
                 break
 
-            print(f"    Processing batch of {len(batch_ids)} hosts (offset {offset})...")
+            print(f"    Processing {len(batch_ids)} {target_provider} hosts...")
 
             # Get detailed host information
             host_details_r = hosts_sdk.get_device_details(ids=batch_ids)
@@ -559,88 +576,38 @@ def fetch_vms_without_sensor(hosts_sdk, cloud_provider):
 
             host_details = host_details_r["body"].get("resources") or []
 
-            # Filter for cloud VMs based on multiple criteria
+            # Process each host
             for host in host_details:
-                hostname = (host.get("hostname") or "").lower()
-                external_ip = host.get("external_ip", "")
+                # Verify service_provider matches (double-check API filter worked)
+                host_provider = host.get("service_provider", "").upper()
+                if host_provider != target_provider:
+                    continue
+
+                # Filter for actual VMs (exclude mobile devices, containers, etc.)
                 platform = host.get("platform_name", "")
-                machine_domain = (host.get("machine_domain") or "").lower()
+                hostname = host.get("hostname", "")
 
-                # Enhanced cloud VM detection logic
-                is_cloud_vm = False
+                # Only include VM-like platforms, exclude mobile and container platforms
+                if platform in ['Android', 'iOS', 'ChromeOS'] or '/subscriptions/' in hostname:
+                    continue
 
-                if cloud_provider == 'azure':
-                    # Azure VM indicators (multiple approaches for better coverage)
-                    is_cloud_vm = any([
-                        # Domain-based detection
-                        'azure' in hostname or 'azure' in machine_domain,
-                        # IP range detection (Azure public IP ranges)
-                        external_ip and (
-                            external_ip.startswith('20.') or
-                            external_ip.startswith('40.') or
-                            external_ip.startswith('52.') or
-                            external_ip.startswith('13.') or
-                            external_ip.startswith('104.')
-                        ),
-                        # Platform hints
-                        platform == 'Windows' and ('vm' in hostname or 'server' in hostname),
-                        # Check if it's NOT on-premises (no domain or specific patterns)
-                        machine_domain == '' or machine_domain in ['workgroup', 'azure'],
-                        # Generic cloud indicators
-                        any(pattern in hostname for pattern in ['vm-', 'server-', 'win-', 'az-'])
-                    ])
+                # Check sensor status based on agent_version presence and validity
+                agent_version = host.get("agent_version", "")
+                has_sensor = bool(agent_version and agent_version != "No Sensor")
 
-                elif cloud_provider == 'aws':
-                    # AWS VM indicators
-                    is_cloud_vm = any([
-                        'amazonaws' in hostname or 'ec2' in hostname,
-                        'aws' in hostname or 'amazon' in hostname,
-                        # AWS IP ranges (simplified)
-                        external_ip and any(external_ip.startswith(prefix) for prefix in [
-                            '3.', '52.', '54.', '18.', '34.', '35.'
-                        ]),
-                        # EC2 instance naming patterns
-                        any(pattern in hostname for pattern in ['i-', 'ec2-', 'ip-'])
-                    ])
-
-                elif cloud_provider == 'gcp':
-                    # GCP VM indicators
-                    is_cloud_vm = any([
-                        'gcp' in hostname or 'google' in hostname,
-                        'compute' in hostname or 'gce' in hostname,
-                        # GCP IP ranges (simplified)
-                        external_ip and any(external_ip.startswith(prefix) for prefix in [
-                            '35.', '34.', '130.', '146.'
-                        ]),
-                        # GCP instance patterns
-                        'instance-' in hostname
-                    ])
-
-                # For broader coverage, if we can't definitively identify cloud provider,
-                # include VMs that look like cloud instances (Windows VMs with generic names)
-                if not is_cloud_vm and cloud_provider == 'azure':
-                    # Fallback: Windows VMs that might be in cloud but not clearly identified
-                    is_cloud_vm = (
-                        platform == 'Windows' and
-                        len(hostname) > 5 and  # Not just "WIN" or similar
-                        not any(corp_indicator in hostname for corp_indicator in [
-                            'corp', 'domain', 'dc-', 'ad-', 'ldap'
-                        ])
-                    )
-
-                if is_cloud_vm:
-                    hosts.append({
-                        'device_id': host.get('device_id'),
-                        'hostname': host.get('hostname'),
-                        'platform_name': host.get('platform_name'),
-                        'external_ip': host.get('external_ip'),
-                        'internal_ip': host.get('local_ip'),
-                        'last_seen': host.get('last_seen'),
-                        'sensor_version': host.get('agent_version') or 'No Sensor',
-                        'cloud_provider': cloud_provider,
-                        'instance_state': 'running' if host.get('last_seen') else 'unknown',
-                        'machine_domain': host.get('machine_domain', '')
-                    })
+                hosts.append({
+                    'device_id': host.get('device_id'),
+                    'hostname': host.get('hostname'),
+                    'platform_name': host.get('platform_name'),
+                    'external_ip': host.get('external_ip'),
+                    'internal_ip': host.get('local_ip'),
+                    'last_seen': host.get('last_seen'),
+                    'sensor_version': agent_version if has_sensor else 'No Sensor',
+                    'cloud_provider': cloud_provider,
+                    'instance_state': 'running' if host.get('last_seen') else 'unknown',
+                    'service_provider': host.get('service_provider', ''),
+                    'has_sensor': has_sensor
+                })
 
             # Update offset for pagination
             offset += len(batch_ids)
@@ -648,59 +615,72 @@ def fetch_vms_without_sensor(hosts_sdk, cloud_provider):
             # Check if we've processed all hosts
             meta = r["body"].get("meta", {})
             total = meta.get("total", 0)
-            if offset >= total:
+            if offset >= total or len(batch_ids) == 0:
                 break
 
         except Exception as e:
             print(f"    Warning: Error processing hosts batch at offset {offset}: {e}")
             offset += batch_size  # Skip this batch and continue
 
-    print(f"    Found {len(hosts)} potential {cloud_provider} VMs")
+    print(f"    Found {len(hosts)} {target_provider} VMs")
     return hosts
 
 
 def fetch_cloud_vms_comprehensive(hosts_sdk, csa_sdk, cloud_provider):
     """
-    Comprehensive approach: Try both Hosts API (for sensor status) and
-    CloudSecurityAssets API (for cloud governance), then combine results.
+    Comprehensive approach: Use Hosts API with proper service_provider field
+    to accurately identify cloud VMs and their sensor status.
 
     This addresses the discrepancy between Asset Explorer (109 Azure VMs without sensor)
     and the original CloudSecurityAssets approach (0 VMs found).
     """
     cloud_vms = []
 
-    # Method 1: Use Hosts API to find VMs without sensor
+    # Method 1: Use Hosts API with proper service_provider filtering
     try:
-        sensor_vms = fetch_vms_without_sensor(hosts_sdk, cloud_provider)
-        cloud_vms.extend(sensor_vms)
+        all_vms = fetch_vms_without_sensor(hosts_sdk, cloud_provider)
+
+        # The function returns ALL VMs for the provider, now filter for sensor status
+        # For the report, we want VMs WITHOUT sensor (matching Asset Explorer logic)
+        vms_without_sensor = [vm for vm in all_vms if not vm.get('has_sensor', True)]
+
+        print(f"    Total {cloud_provider.upper()} VMs: {len(all_vms)}")
+        print(f"    VMs with sensor: {len(all_vms) - len(vms_without_sensor)}")
+        print(f"    VMs without sensor: {len(vms_without_sensor)}")
+
+        cloud_vms.extend(vms_without_sensor)
+
     except Exception as e:
         print(f"    Warning: Hosts API query failed: {e}")
 
-    # Method 2: Use CloudSecurityAssets API for governance view (original approach)
-    provider_filters = {
-        'aws': "managed_by:'Unmanaged'+cloud_provider:'aws'+instance_state:'running'",
-        'azure': "managed_by:'Unmanaged'+cloud_provider:'azure'+instance_state:'running'",
-        'gcp': "managed_by:'Unmanaged'+cloud_provider:'gcp'+instance_state:'running'"
-    }
+    # Method 2 (Fallback): Use CloudSecurityAssets API for governance view if Hosts API fails
+    if not cloud_vms:
+        provider_filters = {
+            'aws': "managed_by:'Unmanaged'+cloud_provider:'aws'+instance_state:'running'",
+            'azure': "managed_by:'Unmanaged'+cloud_provider:'azure'+instance_state:'running'",
+            'gcp': "managed_by:'Unmanaged'+cloud_provider:'gcp'+instance_state:'running'"
+        }
 
-    if cloud_provider in provider_filters:
-        try:
-            governance_vms = fetch_unmanaged_vms(csa_sdk, provider_filters[cloud_provider])
-            # Convert to standard format
-            for vm in governance_vms:
-                cloud_vms.append({
-                    'device_id': vm.get('id'),
-                    'hostname': vm.get('asset_name') or vm.get('resource_name'),
-                    'platform_name': vm.get('platform_name', cloud_provider),
-                    'external_ip': vm.get('public_ip'),
-                    'internal_ip': vm.get('private_ip'),
-                    'last_seen': vm.get('last_seen'),
-                    'sensor_version': 'Unmanaged Resource',
-                    'cloud_provider': cloud_provider,
-                    'instance_state': vm.get('instance_state', 'unknown')
-                })
-        except Exception as e:
-            print(f"    Warning: CloudSecurityAssets API query failed: {e}")
+        if cloud_provider in provider_filters:
+            try:
+                print(f"    Falling back to CloudSecurityAssets API...")
+                governance_vms = fetch_unmanaged_vms(csa_sdk, provider_filters[cloud_provider])
+                # Convert to standard format
+                for vm in governance_vms:
+                    cloud_vms.append({
+                        'device_id': vm.get('id'),
+                        'hostname': vm.get('asset_name') or vm.get('resource_name'),
+                        'platform_name': vm.get('platform_name', cloud_provider),
+                        'external_ip': vm.get('public_ip'),
+                        'internal_ip': vm.get('private_ip'),
+                        'last_seen': vm.get('last_seen'),
+                        'sensor_version': 'Unmanaged Resource',
+                        'cloud_provider': cloud_provider,
+                        'instance_state': vm.get('instance_state', 'unknown'),
+                        'has_sensor': False
+                    })
+            except Exception as e:
+                print(f"    Warning: CloudSecurityAssets API query also failed: {e}")
 
     # Deduplicate by hostname/device_id
     seen = set()
