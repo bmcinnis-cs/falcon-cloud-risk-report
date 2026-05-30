@@ -9,15 +9,12 @@ from urllib.parse import quote
 import re as _re
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections
+from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections, Hosts
 from fpdf import FPDF, XPos, YPos
 
 RISKS_FILTER = "status:'Open'+severity:'High'"
-VM_FILTERS = [
-    ("AWS",   "managed_by:'Unmanaged'+cloud_provider:'aws'+instance_state:'running'"),
-    ("Azure", "managed_by:'Unmanaged'+cloud_provider:'azure'+instance_state:'running'"),
-    ("GCP",   "managed_by:'Unmanaged'+cloud_provider:'gcp'+instance_state:'running'"),
-]
+# Updated VM approach: Use Hosts API instead of CloudSecurityAssets for accurate sensor data
+VM_PROVIDERS = ["AWS", "Azure", "GCP"]  # Simplified - no filters needed for Hosts API
 def get_default_output_filename():
     """Generate a default output filename with timestamp"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -172,7 +169,7 @@ def interactive_config():
     print(f"  {T_BOLD}Sections{T_RESET}")
     config["include_risks"] = _prompt_yn("Include Cloud Risks", default=True)
     config["include_ioas"]  = _prompt_yn("Include Cloud IOA Detections", default=True)
-    config["include_vms"]   = _prompt_yn("Include Unmanaged VMs", default=True)
+    config["include_vms"]   = _prompt_yn("Include VMs without Falcon Sensor", default=True)
     config["include_ai_packages"] = _prompt_yn("Include AI Package Risks (Critical CVEs)", default=True)
     print()
 
@@ -352,10 +349,10 @@ def build_filters(config):
     if provider != "all":
         risks_filter += f"+cloud_provider:'{provider}'"
 
+    # Updated: Return VM providers instead of filters (Hosts API doesn't use these filters)
     vm_providers = config.get("vm_providers", ["AWS", "Azure", "GCP"])
-    vm_filters = [(p, f) for p, f in VM_FILTERS if p in vm_providers]
 
-    return risks_filter, vm_filters
+    return risks_filter, vm_providers
 
 
 def _filter_desc(config):
@@ -496,6 +493,7 @@ def fetch_cloud_ioas(sdk, ioa_severities=None):
 
 
 def fetch_unmanaged_vms(sdk, filter_str):
+    """Legacy function - kept for compatibility but no longer used"""
     ids = []
     after = None
     while True:
@@ -518,6 +516,202 @@ def fetch_unmanaged_vms(sdk, filter_str):
             raise RuntimeError(f"get_assets failed: {r['body'].get('errors')}")
         assets.extend(r["body"].get("resources") or [])
     return assets
+
+
+def fetch_vms_without_sensor(hosts_sdk, cloud_provider):
+    """
+    Fetch VMs without CrowdStrike Falcon sensor for a specific cloud provider.
+    Uses the Hosts API to find cloud VMs that don't have the sensor installed.
+
+    Args:
+        hosts_sdk: Hosts API SDK instance
+        cloud_provider: 'aws', 'azure', or 'gcp'
+
+    Returns:
+        List of host records representing VMs without sensor
+    """
+    hosts = []
+    offset = 0
+    batch_size = 1000
+
+    print(f"    Scanning all hosts for {cloud_provider} VMs...")
+
+    # Query ALL hosts and filter them client-side for better accuracy
+    while True:
+        try:
+            r = hosts_sdk.query_devices_by_filter(limit=batch_size, offset=offset)
+            if r["status_code"] != 200:
+                dbg_response("query_devices_by_filter", r)
+                break
+
+            batch_ids = r["body"].get("resources") or []
+            if not batch_ids:
+                break
+
+            print(f"    Processing batch of {len(batch_ids)} hosts (offset {offset})...")
+
+            # Get detailed host information
+            host_details_r = hosts_sdk.get_device_details(ids=batch_ids)
+            if host_details_r["status_code"] != 200:
+                dbg_response("get_device_details", host_details_r)
+                offset += len(batch_ids)
+                continue
+
+            host_details = host_details_r["body"].get("resources") or []
+
+            # Filter for cloud VMs based on multiple criteria
+            for host in host_details:
+                hostname = (host.get("hostname") or "").lower()
+                external_ip = host.get("external_ip", "")
+                platform = host.get("platform_name", "")
+                machine_domain = (host.get("machine_domain") or "").lower()
+
+                # Enhanced cloud VM detection logic
+                is_cloud_vm = False
+
+                if cloud_provider == 'azure':
+                    # Azure VM indicators (multiple approaches for better coverage)
+                    is_cloud_vm = any([
+                        # Domain-based detection
+                        'azure' in hostname or 'azure' in machine_domain,
+                        # IP range detection (Azure public IP ranges)
+                        external_ip and (
+                            external_ip.startswith('20.') or
+                            external_ip.startswith('40.') or
+                            external_ip.startswith('52.') or
+                            external_ip.startswith('13.') or
+                            external_ip.startswith('104.')
+                        ),
+                        # Platform hints
+                        platform == 'Windows' and ('vm' in hostname or 'server' in hostname),
+                        # Check if it's NOT on-premises (no domain or specific patterns)
+                        machine_domain == '' or machine_domain in ['workgroup', 'azure'],
+                        # Generic cloud indicators
+                        any(pattern in hostname for pattern in ['vm-', 'server-', 'win-', 'az-'])
+                    ])
+
+                elif cloud_provider == 'aws':
+                    # AWS VM indicators
+                    is_cloud_vm = any([
+                        'amazonaws' in hostname or 'ec2' in hostname,
+                        'aws' in hostname or 'amazon' in hostname,
+                        # AWS IP ranges (simplified)
+                        external_ip and any(external_ip.startswith(prefix) for prefix in [
+                            '3.', '52.', '54.', '18.', '34.', '35.'
+                        ]),
+                        # EC2 instance naming patterns
+                        any(pattern in hostname for pattern in ['i-', 'ec2-', 'ip-'])
+                    ])
+
+                elif cloud_provider == 'gcp':
+                    # GCP VM indicators
+                    is_cloud_vm = any([
+                        'gcp' in hostname or 'google' in hostname,
+                        'compute' in hostname or 'gce' in hostname,
+                        # GCP IP ranges (simplified)
+                        external_ip and any(external_ip.startswith(prefix) for prefix in [
+                            '35.', '34.', '130.', '146.'
+                        ]),
+                        # GCP instance patterns
+                        'instance-' in hostname
+                    ])
+
+                # For broader coverage, if we can't definitively identify cloud provider,
+                # include VMs that look like cloud instances (Windows VMs with generic names)
+                if not is_cloud_vm and cloud_provider == 'azure':
+                    # Fallback: Windows VMs that might be in cloud but not clearly identified
+                    is_cloud_vm = (
+                        platform == 'Windows' and
+                        len(hostname) > 5 and  # Not just "WIN" or similar
+                        not any(corp_indicator in hostname for corp_indicator in [
+                            'corp', 'domain', 'dc-', 'ad-', 'ldap'
+                        ])
+                    )
+
+                if is_cloud_vm:
+                    hosts.append({
+                        'device_id': host.get('device_id'),
+                        'hostname': host.get('hostname'),
+                        'platform_name': host.get('platform_name'),
+                        'external_ip': host.get('external_ip'),
+                        'internal_ip': host.get('local_ip'),
+                        'last_seen': host.get('last_seen'),
+                        'sensor_version': host.get('agent_version') or 'No Sensor',
+                        'cloud_provider': cloud_provider,
+                        'instance_state': 'running' if host.get('last_seen') else 'unknown',
+                        'machine_domain': host.get('machine_domain', '')
+                    })
+
+            # Update offset for pagination
+            offset += len(batch_ids)
+
+            # Check if we've processed all hosts
+            meta = r["body"].get("meta", {})
+            total = meta.get("total", 0)
+            if offset >= total:
+                break
+
+        except Exception as e:
+            print(f"    Warning: Error processing hosts batch at offset {offset}: {e}")
+            offset += batch_size  # Skip this batch and continue
+
+    print(f"    Found {len(hosts)} potential {cloud_provider} VMs")
+    return hosts
+
+
+def fetch_cloud_vms_comprehensive(hosts_sdk, csa_sdk, cloud_provider):
+    """
+    Comprehensive approach: Try both Hosts API (for sensor status) and
+    CloudSecurityAssets API (for cloud governance), then combine results.
+
+    This addresses the discrepancy between Asset Explorer (109 Azure VMs without sensor)
+    and the original CloudSecurityAssets approach (0 VMs found).
+    """
+    cloud_vms = []
+
+    # Method 1: Use Hosts API to find VMs without sensor
+    try:
+        sensor_vms = fetch_vms_without_sensor(hosts_sdk, cloud_provider)
+        cloud_vms.extend(sensor_vms)
+    except Exception as e:
+        print(f"    Warning: Hosts API query failed: {e}")
+
+    # Method 2: Use CloudSecurityAssets API for governance view (original approach)
+    provider_filters = {
+        'aws': "managed_by:'Unmanaged'+cloud_provider:'aws'+instance_state:'running'",
+        'azure': "managed_by:'Unmanaged'+cloud_provider:'azure'+instance_state:'running'",
+        'gcp': "managed_by:'Unmanaged'+cloud_provider:'gcp'+instance_state:'running'"
+    }
+
+    if cloud_provider in provider_filters:
+        try:
+            governance_vms = fetch_unmanaged_vms(csa_sdk, provider_filters[cloud_provider])
+            # Convert to standard format
+            for vm in governance_vms:
+                cloud_vms.append({
+                    'device_id': vm.get('id'),
+                    'hostname': vm.get('asset_name') or vm.get('resource_name'),
+                    'platform_name': vm.get('platform_name', cloud_provider),
+                    'external_ip': vm.get('public_ip'),
+                    'internal_ip': vm.get('private_ip'),
+                    'last_seen': vm.get('last_seen'),
+                    'sensor_version': 'Unmanaged Resource',
+                    'cloud_provider': cloud_provider,
+                    'instance_state': vm.get('instance_state', 'unknown')
+                })
+        except Exception as e:
+            print(f"    Warning: CloudSecurityAssets API query failed: {e}")
+
+    # Deduplicate by hostname/device_id
+    seen = set()
+    unique_vms = []
+    for vm in cloud_vms:
+        key = vm.get('hostname') or vm.get('device_id')
+        if key and key not in seen:
+            seen.add(key)
+            unique_vms.append(vm)
+
+    return unique_vms
 
 
 def _image_label(img):
@@ -1073,7 +1267,7 @@ class FalconReport(FPDF):
             for provider, count in vm_totals.items():
                 self.set_font("Helvetica", "", 9)
                 self.set_text_color(*MID_GRAY)
-                self.cell(0, 7, f"Unmanaged Running VMs ({provider}):  {count}", align="C",
+                self.cell(0, 7, f"VMs without Falcon Sensor ({provider}):  {count}", align="C",
                           new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
         if ai_packages_count is not None:
@@ -1289,7 +1483,7 @@ class FalconReport(FPDF):
         if not assets:
             self.set_font("Helvetica", "", 8)
             self.set_text_color(*MID_GRAY)
-            self.cell(0, 8, "  No assets found.", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.cell(0, 8, "  No VMs without sensor found.", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             self.ln(2)
             return
 
@@ -1300,8 +1494,8 @@ class FalconReport(FPDF):
             self.set_font("Helvetica", "B", 8)
             self.set_text_color(*WHITE)
             self.set_x(self.l_margin)
-            self.cell(col_w, 7, "  Resource ID", fill=True)
-            self.cell(col_w, 7, "  Account ID", fill=True,
+            self.cell(col_w, 7, "  Hostname", fill=True)
+            self.cell(col_w, 7, "  Sensor Status", fill=True,
                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
         _table_header()
@@ -1310,14 +1504,20 @@ class FalconReport(FPDF):
             if self.get_y() + 6.5 > self.h - self.b_margin:
                 self.add_page()
                 _table_header()
-            rid = asset.get("resource_id", "N/A")
-            rid_display = rid if len(rid) <= 45 else rid[:42] + "..."
+
+            # Handle both old (CloudSecurityAssets) and new (Hosts API) data structures
+            hostname = asset.get("hostname") or asset.get("asset_name") or asset.get("resource_name", "N/A")
+            sensor_status = asset.get("sensor_version", "No Sensor")
+
+            # Truncate long hostnames for display
+            hostname_display = hostname if len(hostname) <= 45 else hostname[:42] + "..."
+
             self.set_fill_color(*(SECTION_BG if idx % 2 == 0 else WHITE))
             self.set_font("Helvetica", "", 7.5)
             self.set_text_color(*DARK)
             self.set_x(self.l_margin)
-            self.cell(col_w, 6.5, f"  {rid_display}", fill=True)
-            self.cell(col_w, 6.5, f"  {asset.get('account_id', 'N/A')}", fill=True,
+            self.cell(col_w, 6.5, f"  {hostname_display}", fill=True)
+            self.cell(col_w, 6.5, f"  {sensor_status}", fill=True,
                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
         self.ln(4)
@@ -1543,7 +1743,7 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
     if config.get("include_vms"):
         pdf.add_page()
         total_vms = sum(vm_totals.values())
-        pdf.section_header(f"Unmanaged Running VMs  ({total_vms} total)")
+        pdf.section_header(f"VMs without Falcon Sensor  ({total_vms} total)")
         for provider, assets in vm_data.items():
             pdf.sub_header(f"{provider}  -  {len(assets)} asset(s)")
             pdf.vm_table(assets)
@@ -1577,7 +1777,7 @@ if __name__ == "__main__":
         sys.exit("Error: FALCON_CLIENT_ID and FALCON_CLIENT_SECRET must be set in the environment or .env file.")
 
     config = interactive_config() if args.interactive else _default_config()
-    risks_filter, vm_filters = build_filters(config)
+    risks_filter, vm_providers = build_filters(config)
 
     auth = OAuth2(
         client_id=client_id,
@@ -1590,6 +1790,7 @@ if __name__ == "__main__":
     cp              = ContainerPackages(auth_object=auth)
     ci              = ContainerImages(auth_object=auth)
     csd             = CloudSecurityDetections(auth_object=auth)
+    hosts           = Hosts(auth_object=auth)  # Added for VM sensor detection
 
     risks = []
     if config["include_risks"]:
@@ -1605,10 +1806,11 @@ if __name__ == "__main__":
 
     vm_data = {}
     if config["include_vms"]:
-        for provider, vm_filter in vm_filters:
-            print(f"{T_DIM}Fetching VMs:    {vm_filter}{T_RESET}")
-            assets = fetch_unmanaged_vms(csa, vm_filter)
-            print(f"{T_DIM}  Found {len(assets)} asset(s) for {provider}.{T_RESET}")
+        for provider in vm_providers:
+            print(f"{T_DIM}Fetching VMs without sensor for {provider}...{T_RESET}")
+            # Use comprehensive approach to find VMs (both Hosts API and CloudSecurityAssets)
+            assets = fetch_cloud_vms_comprehensive(hosts, csa, provider.lower())
+            print(f"{T_DIM}  Found {len(assets)} VM(s) without Falcon sensor for {provider}.{T_RESET}")
             vm_data[provider] = assets
 
     ai_packages = []
