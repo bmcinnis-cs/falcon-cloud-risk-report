@@ -18,7 +18,12 @@ VM_FILTERS = [
     ("Azure", "managed_by:'Unmanaged'+cloud_provider:'azure'+instance_state:'running'"),
     ("GCP",   "managed_by:'Unmanaged'+cloud_provider:'gcp'+instance_state:'running'"),
 ]
-OUTPUT_FILE    = "falcon_cloud_security_report.pdf"
+def get_default_output_filename():
+    """Generate a default output filename with timestamp"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"falcon_cloud_security_report_{timestamp}.pdf"
+
+OUTPUT_FILE    = get_default_output_filename()
 DEFAULTS_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".report_defaults.json")
 
 VALID_SEVERITIES = ["Critical", "High", "Medium", "Low", "Informational"]
@@ -380,7 +385,11 @@ def _filter_desc(config):
 
 
 def now_utc():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+def now_utc_detailed():
+    """Returns a more detailed timestamp for report generation"""
+    return datetime.now(timezone.utc).strftime("%B %d, %Y at %H:%M:%S UTC")
 
 
 def sanitize(text):
@@ -1038,7 +1047,13 @@ class FalconReport(FPDF):
         self.set_text_color(*CS_RED)
         self.cell(0, 10, "Security Report", align="C",
                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-        self.ln(12)
+
+        # Add date subtitle
+        self.set_font("Helvetica", "", 10)
+        self.set_text_color(*LIGHT_GRAY)
+        self.cell(0, 8, datetime.now(timezone.utc).strftime("%B %d, %Y"), align="C",
+                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        self.ln(8)
 
         if risks_count is not None:
             self.set_font("Helvetica", "B", 10)
@@ -1086,7 +1101,7 @@ class FalconReport(FPDF):
         self.ln(10)
         self.set_font("Helvetica", "", 9)
         self.set_text_color(*MID_GRAY)
-        self.cell(0, 7, f"Generated: {now_utc()}", align="C",
+        self.cell(0, 7, f"Generated: {now_utc_detailed()}", align="C",
                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     def section_header(self, title):
@@ -1535,6 +1550,7 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
 
     pdf.output(output_file)
     print(f"Report written to {output_file}")
+    print(f"Generated at: {now_utc_detailed()}")
 
 
 if __name__ == "__main__":
