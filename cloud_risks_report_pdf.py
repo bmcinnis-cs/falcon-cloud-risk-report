@@ -19,10 +19,33 @@ VM_FILTERS = [
     ("Azure", "active:'true'+cloud_provider:'azure'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
     ("GCP",   "active:'true'+cloud_provider:'gcp'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
 ]
+
 def get_default_output_filename():
     """Generate a default output filename with timestamp"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"falcon_cloud_security_report_{timestamp}.pdf"
+
+def ensure_timestamped_filename(filename):
+    """Ensure filename has timestamp for uniqueness"""
+    if not filename:
+        return get_default_output_filename()
+
+    # Check if filename already has timestamp pattern (YYYYMMDD_HHMMSS)
+    import re
+    timestamp_pattern = r'_\d{8}_\d{6}'
+
+    if re.search(timestamp_pattern, filename):
+        return filename  # Already has timestamp
+
+    # Add timestamp before .pdf extension
+    if filename.endswith('.pdf'):
+        base_name = filename[:-4]  # Remove .pdf
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"{base_name}_{timestamp}.pdf"
+    else:
+        # Add .pdf and timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"{filename}_{timestamp}.pdf"
 
 OUTPUT_FILE    = get_default_output_filename()
 DEFAULTS_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".report_defaults.json")
@@ -251,7 +274,8 @@ def interactive_config():
     print()
 
     print(f"  {T_BOLD}Output{T_RESET}")
-    config["output_file"] = _prompt("Output filename", OUTPUT_FILE)
+    user_filename = _prompt("Output filename", OUTPUT_FILE)
+    config["output_file"] = ensure_timestamped_filename(user_filename)
     print()
 
     merged = {**_default_config(), **config}
@@ -1652,7 +1676,7 @@ class FalconReport(FPDF):
 
 
 def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
-    output_file = config.get("output_file", OUTPUT_FILE)
+    output_file = ensure_timestamped_filename(config.get("output_file", OUTPUT_FILE))
     vm_totals = {provider: len(assets) for provider, assets in vm_data.items()}
     iom_cats = config.get("iom_categories", [])
     iom_sevs = config.get("iom_severities", [])
