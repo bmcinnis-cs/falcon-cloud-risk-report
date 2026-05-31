@@ -37,11 +37,13 @@ def ensure_timestamped_filename(filename):
     if re.search(timestamp_pattern, filename):
         return filename  # Already has timestamp
 
-    # Add timestamp before .pdf extension
-    if filename.endswith('.pdf'):
-        base_name = filename[:-4]  # Remove .pdf
+    # Add timestamp before .pdf extension (case-insensitive)
+    if filename.lower().endswith('.pdf'):
+        base_name = filename[:-4]  # Remove .pdf/.PDF
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"{base_name}_{timestamp}.pdf"
+        # Preserve original extension case
+        extension = filename[-4:]  # Get original .pdf or .PDF
+        return f"{base_name}_{timestamp}{extension}"
     else:
         # Add .pdf and timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
