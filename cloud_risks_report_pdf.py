@@ -3,17 +3,15 @@ import sys
 import json
 import argparse
 import textwrap
-import html as _html
+import html
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
-import re as _re
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections
 from fpdf import FPDF, XPos, YPos
 
-RISKS_FILTER = "status:'Open'+severity:'High'"
-# Updated VM approach: Use CloudSecurityAssets with exact Asset Explorer filters
 VM_FILTERS = [
     ("AWS",   "active:'true'+cloud_provider:'aws'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
     ("Azure", "active:'true'+cloud_provider:'azure'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
@@ -26,7 +24,7 @@ def ensure_timestamped_filename(filename):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return f"falcon_cloud_security_report_{timestamp}.pdf"
 
-    if _re.search(r'_\d{8}_\d{6}', filename):
+    if re.search(r'_\d{8}_\d{6}', filename):
         return filename
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -429,7 +427,7 @@ def _strip_html(text):
         return text
 
     # <br> variants → newline
-    text = _re.sub(r'<br\s*/?>', '\n', text, flags=_re.IGNORECASE)
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
 
     # <a href="url">label</a>: keep label; append url when it adds information
     def _repl_anchor(m):
@@ -439,18 +437,18 @@ def _strip_html(text):
             return f"{label} ({href})"
         return label or href
 
-    text = _re.sub(
+    text = re.sub(
         r'<a\s[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>',
         _repl_anchor,
         text,
-        flags=_re.IGNORECASE | _re.DOTALL,
+        flags=re.IGNORECASE | re.DOTALL,
     )
 
     # Strip remaining tags
-    text = _re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'<[^>]+>', '', text)
 
     # Unescape HTML entities (&amp; → &, &lt; → <, &#39; → ', etc.)
-    text = _html.unescape(text)
+    text = html.unescape(text)
 
     return text
 
@@ -509,7 +507,6 @@ def fetch_cloud_ioas(sdk, ioa_severities=None):
 
 
 def fetch_unmanaged_vms(sdk, filter_str):
-    """Legacy function - kept for compatibility but no longer used"""
     ids = []
     after = None
     while True:
@@ -716,7 +713,7 @@ def t_label(text):
 def print_risks(risks):
     width = 64
     print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}  FALCON CLOUD SECURITY -- OPEN HIGH SEVERITY RISKS{T_RESET}")
+    print(f"{T_BOLD}{T_CYAN}  FALCON CLOUD SECURITY -- CLOUD RISKS{T_RESET}")
     print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
     print(f"  {t_label('Total risks found:')} {T_BOLD}{T_WHITE}{len(risks)}{T_RESET}")
     print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
@@ -909,7 +906,7 @@ def _falcon_iom_url(iom):
     if api_base == "https://api.crowdstrike.com":
         console = "https://falcon.crowdstrike.com"
     else:
-        m = _re.search(r"https://api\.([^/]+)\.crowdstrike\.com", api_base)
+        m = re.search(r"https://api\.([^/]+)\.crowdstrike\.com", api_base)
         if m:
             console = f"https://{m.group(1)}.falcon.crowdstrike.com"
         else:
@@ -1442,15 +1439,7 @@ class FalconReport(FPDF):
             ("Region",        iom.get("region")),
             ("Description",   iom.get("description")),
         ]
-        col_w = self.epw - self.LABEL_W
         for idx, (field, value) in enumerate(fields):
-            self.set_font("Helvetica", "", 8)
-            char_w = self.get_string_width("m") or 2.5
-            chars_per_line = max(1, int(col_w / char_w))
-            n_lines = max(1, -(-len(str(value or "N/A")) // chars_per_line))
-            field_h = n_lines * 6 + 4
-            if self.get_y() + field_h > self.h - self.b_margin:
-                self.add_page()
             self.row(field, value, alt=idx % 2 == 0)
         if console_url:
             self.link_row("Console", console_url, alt=len(fields) % 2 == 0)
@@ -1663,4 +1652,3 @@ if __name__ == "__main__":
 
     print(f"{T_DIM}Building PDF...{T_RESET}")
     build_pdf(risks, ioas, vm_data, ai_packages, ioms, config)
-    print(f"{T_BOLD}{T_CYAN}PDF written to {config['output_file']}{T_RESET}")
