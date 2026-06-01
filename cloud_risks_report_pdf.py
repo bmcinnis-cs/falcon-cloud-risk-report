@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections, Hosts
+from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections
 from fpdf import FPDF, XPos, YPos
 
 VM_FILTERS = [
@@ -183,7 +183,6 @@ def interactive_config():
     config["include_risks"] = _prompt_yn("Include Cloud Risks", default=True)
     config["include_ioas"]  = _prompt_yn("Include Cloud IOA Detections", default=True)
     config["include_vms"]   = _prompt_yn("Include Unmanaged Virtual Machines", default=True)
-    config["include_vms"]   = _prompt_yn("Include Unmanaged VMs", default=True)
     config["include_ai_packages"] = _prompt_yn("Include AI Package Risks (Critical CVEs)", default=True)
     print()
 
