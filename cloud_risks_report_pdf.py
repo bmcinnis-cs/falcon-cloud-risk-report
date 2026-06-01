@@ -9,7 +9,7 @@ from urllib.parse import quote
 import re as _re
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections, Hosts
+from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections
 from fpdf import FPDF, XPos, YPos
 
 RISKS_FILTER = "status:'Open'+severity:'High'"
@@ -20,36 +20,22 @@ VM_FILTERS = [
     ("GCP",   "active:'true'+cloud_provider:'gcp'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
 ]
 
-def get_default_output_filename():
-    """Generate a default output filename with timestamp"""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"falcon_cloud_security_report_{timestamp}.pdf"
-
 def ensure_timestamped_filename(filename):
-    """Ensure filename has timestamp for uniqueness"""
+    """Append YYYYMMDD_HHMMSS to a filename before the extension if not already present."""
     if not filename:
-        return get_default_output_filename()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"falcon_cloud_security_report_{timestamp}.pdf"
 
-    # Check if filename already has timestamp pattern (YYYYMMDD_HHMMSS)
-    import re
-    timestamp_pattern = r'_\d{8}_\d{6}'
+    if _re.search(r'_\d{8}_\d{6}', filename):
+        return filename
 
-    if re.search(timestamp_pattern, filename):
-        return filename  # Already has timestamp
-
-    # Add timestamp before .pdf extension (case-insensitive)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if filename.lower().endswith('.pdf'):
-        base_name = filename[:-4]  # Remove .pdf/.PDF
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Preserve original extension case
-        extension = filename[-4:]  # Get original .pdf or .PDF
-        return f"{base_name}_{timestamp}{extension}"
-    else:
-        # Add .pdf and timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"{filename}_{timestamp}.pdf"
+        base, ext = filename[:-4], filename[-4:]
+        return f"{base}_{timestamp}{ext}"
+    return f"{filename}_{timestamp}.pdf"
 
-OUTPUT_FILE    = get_default_output_filename()
+OUTPUT_FILE    = "falcon_cloud_security_report.pdf"
 DEFAULTS_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".report_defaults.json")
 
 VALID_SEVERITIES = ["Critical", "High", "Medium", "Low", "Informational"]
@@ -198,7 +184,7 @@ def interactive_config():
     print(f"  {T_BOLD}Sections{T_RESET}")
     config["include_risks"] = _prompt_yn("Include Cloud Risks", default=True)
     config["include_ioas"]  = _prompt_yn("Include Cloud IOA Detections", default=True)
-    config["include_vms"]   = _prompt_yn("Include Unmanaged Virtual Machines", default=True)
+    config["include_vms"]   = _prompt_yn("Include Unmanaged VMs", default=True)
     config["include_ai_packages"] = _prompt_yn("Include AI Package Risks (Critical CVEs)", default=True)
     print()
 
@@ -276,8 +262,7 @@ def interactive_config():
     print()
 
     print(f"  {T_BOLD}Output{T_RESET}")
-    user_filename = _prompt("Output filename", OUTPUT_FILE)
-    config["output_file"] = ensure_timestamped_filename(user_filename)
+    config["output_file"] = ensure_timestamped_filename(_prompt("Output filename", OUTPUT_FILE))
     print()
 
     merged = {**_default_config(), **config}
@@ -547,182 +532,6 @@ def fetch_unmanaged_vms(sdk, filter_str):
             raise RuntimeError(f"get_assets failed: {r['body'].get('errors')}")
         assets.extend(r["body"].get("resources") or [])
     return assets
-
-
-def fetch_vms_without_sensor(hosts_sdk, cloud_provider):
-    """
-    Fetch VMs without CrowdStrike Falcon sensor for a specific cloud provider.
-    Uses the Hosts API with proper service_provider field identification.
-
-    Args:
-        hosts_sdk: Hosts API SDK instance
-        cloud_provider: 'aws', 'azure', or 'gcp'
-
-    Returns:
-        List of host records representing VMs without sensor
-    """
-    hosts = []
-    offset = 0
-    batch_size = 1000
-
-    # Map cloud provider names to service_provider field values
-    service_provider_mapping = {
-        'aws': 'AWS',
-        'azure': 'AZURE',
-        'gcp': 'GCP'
-    }
-
-    target_provider = service_provider_mapping.get(cloud_provider.lower())
-    if not target_provider:
-        print(f"    Warning: Unknown cloud provider '{cloud_provider}'")
-        return []
-
-    print(f"    Querying hosts with service_provider:'{target_provider}'...")
-
-    while True:
-        try:
-            # Use proper API filter for service provider
-            r = hosts_sdk.query_devices_by_filter(
-                limit=batch_size,
-                offset=offset,
-                filter=f"service_provider:'{target_provider}'"
-            )
-
-            if r["status_code"] != 200:
-                dbg_response("query_devices_by_filter", r)
-                break
-
-            batch_ids = r["body"].get("resources") or []
-            if not batch_ids:
-                break
-
-            print(f"    Processing {len(batch_ids)} {target_provider} hosts...")
-
-            # Get detailed host information
-            host_details_r = hosts_sdk.get_device_details(ids=batch_ids)
-            if host_details_r["status_code"] != 200:
-                dbg_response("get_device_details", host_details_r)
-                offset += len(batch_ids)
-                continue
-
-            host_details = host_details_r["body"].get("resources") or []
-
-            # Process each host
-            for host in host_details:
-                # Verify service_provider matches (double-check API filter worked)
-                host_provider = host.get("service_provider", "").upper()
-                if host_provider != target_provider:
-                    continue
-
-                # Filter for actual VMs (exclude mobile devices, containers, etc.)
-                platform = host.get("platform_name", "")
-                hostname = host.get("hostname", "")
-
-                # Only include VM-like platforms, exclude mobile and container platforms
-                if platform in ['Android', 'iOS', 'ChromeOS'] or '/subscriptions/' in hostname:
-                    continue
-
-                # Check sensor status based on agent_version presence and validity
-                agent_version = host.get("agent_version", "")
-                has_sensor = bool(agent_version and agent_version != "No Sensor")
-
-                hosts.append({
-                    'device_id': host.get('device_id'),
-                    'hostname': host.get('hostname'),
-                    'platform_name': host.get('platform_name'),
-                    'external_ip': host.get('external_ip'),
-                    'internal_ip': host.get('local_ip'),
-                    'last_seen': host.get('last_seen'),
-                    'sensor_version': agent_version if has_sensor else 'No Sensor',
-                    'cloud_provider': cloud_provider,
-                    'instance_state': 'running' if host.get('last_seen') else 'unknown',
-                    'service_provider': host.get('service_provider', ''),
-                    'has_sensor': has_sensor
-                })
-
-            # Update offset for pagination
-            offset += len(batch_ids)
-
-            # Check if we've processed all hosts
-            meta = r["body"].get("meta", {})
-            total = meta.get("total", 0)
-            if offset >= total or len(batch_ids) == 0:
-                break
-
-        except Exception as e:
-            print(f"    Warning: Error processing hosts batch at offset {offset}: {e}")
-            offset += batch_size  # Skip this batch and continue
-
-    print(f"    Found {len(hosts)} {target_provider} VMs")
-    return hosts
-
-
-def fetch_cloud_vms_comprehensive(hosts_sdk, csa_sdk, cloud_provider):
-    """
-    Comprehensive approach: Use Hosts API with proper service_provider field
-    to accurately identify cloud VMs and their sensor status.
-
-    This addresses the discrepancy between Asset Explorer (109 Azure VMs without sensor)
-    and the original CloudSecurityAssets approach (0 VMs found).
-    """
-    cloud_vms = []
-
-    # Method 1: Use Hosts API with proper service_provider filtering
-    try:
-        all_vms = fetch_vms_without_sensor(hosts_sdk, cloud_provider)
-
-        # The function returns ALL VMs for the provider, now filter for sensor status
-        # For the report, we want VMs WITHOUT sensor (matching Asset Explorer logic)
-        vms_without_sensor = [vm for vm in all_vms if not vm.get('has_sensor', True)]
-
-        print(f"    Total {cloud_provider.upper()} VMs: {len(all_vms)}")
-        print(f"    VMs with sensor: {len(all_vms) - len(vms_without_sensor)}")
-        print(f"    VMs without sensor: {len(vms_without_sensor)}")
-
-        cloud_vms.extend(vms_without_sensor)
-
-    except Exception as e:
-        print(f"    Warning: Hosts API query failed: {e}")
-
-    # Method 2 (Fallback): Use CloudSecurityAssets API for governance view if Hosts API fails
-    if not cloud_vms:
-        provider_filters = {
-            'aws': "managed_by:'Unmanaged'+cloud_provider:'aws'+instance_state:'running'",
-            'azure': "managed_by:'Unmanaged'+cloud_provider:'azure'+instance_state:'running'",
-            'gcp': "managed_by:'Unmanaged'+cloud_provider:'gcp'+instance_state:'running'"
-        }
-
-        if cloud_provider in provider_filters:
-            try:
-                print(f"    Falling back to CloudSecurityAssets API...")
-                governance_vms = fetch_unmanaged_vms(csa_sdk, provider_filters[cloud_provider])
-                # Convert to standard format
-                for vm in governance_vms:
-                    cloud_vms.append({
-                        'device_id': vm.get('id'),
-                        'hostname': vm.get('asset_name') or vm.get('resource_name'),
-                        'platform_name': vm.get('platform_name', cloud_provider),
-                        'external_ip': vm.get('public_ip'),
-                        'internal_ip': vm.get('private_ip'),
-                        'last_seen': vm.get('last_seen'),
-                        'sensor_version': 'Unmanaged Resource',
-                        'cloud_provider': cloud_provider,
-                        'instance_state': vm.get('instance_state', 'unknown'),
-                        'has_sensor': False
-                    })
-            except Exception as e:
-                print(f"    Warning: CloudSecurityAssets API query also failed: {e}")
-
-    # Deduplicate by hostname/device_id
-    seen = set()
-    unique_vms = []
-    for vm in cloud_vms:
-        key = vm.get('hostname') or vm.get('device_id')
-        if key and key not in seen:
-            seen.add(key)
-            unique_vms.append(vm)
-
-    return unique_vms
 
 
 def _image_label(img):
