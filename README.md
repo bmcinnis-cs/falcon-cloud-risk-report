@@ -16,6 +16,7 @@ A single PDF with a cover page, a clickable table of contents, and up to five co
 | **Cloud IOA Detections** | Event name, description, severity, MITRE tactic/technique, user, region, and timestamp |
 | **AI Package Risks** | AI-related container packages with CVEs — CVE ID, description, fix version, and affected image names |
 | **Cloud Service IOMs** | Active misconfigurations filtered by service category and severity, with remediation steps, cloud console deep-links, and Falcon links |
+| **Risky Images** | Container images with CVEs — per-image layer breakdown showing which `RUN` layer introduced each CVE, CVSS score, package, exploit/fix flags, and a Falcon console deep-link |
 | **Unmanaged Running VMs** | Table of unmanaged, running VMs scoped to your selected cloud providers |
 
 ---
@@ -33,7 +34,7 @@ A single PDF with a cover page, a clickable table of contents, and up to five co
 | Falcon Container Image | Read |
 | Cloud Security Detections | Read |
 
-> **Falcon Container Image** is only required when the AI Package Risks section is enabled.  
+> **Falcon Container Image** is required for both the AI Package Risks and Risky Images sections.  
 > **Cloud Security Detections** is only required when the Cloud Service IOMs section is enabled.
 
 ---
@@ -111,6 +112,7 @@ Pass `-i` or `--interactive` to configure the report before any API calls are ma
   Include Cloud IOA Detections (Y/n)
   Include Unmanaged Virtual Machines (Y/n)
   Include AI Package Risks (Critical CVEs) (Y/n)
+  Include Risky Images (CVE layer breakdown) (y/N)
 
   ▸ Risk Filters
   Available severities: Critical, High, Medium, Low, Informational
@@ -127,6 +129,11 @@ Pass `-i` or `--interactive` to configure the report before any API calls are ma
   ▸ AI Package Filters
   Available severities: Critical, High, Medium, Low, Informational, all
   Package severity (comma-separated, or all)  [Critical]
+
+  ▸ Risky Images Filters
+  Available severities: Critical, High, Medium, Low, Informational, all
+  CVE severity (comma-separated, or all)  [Critical]
+  Max images to include  [10]
 
   ▸ VM Filters
   Available providers: AWS, Azure, GCP
@@ -154,11 +161,14 @@ Pass `-i` or `--interactive` to configure the report before any API calls are ma
 | Include Cloud IOA Detections | `y` / `n` | `y` |
 | Include Unmanaged Virtual Machines | `y` / `n` | `y` |
 | Include AI Package Risks | `y` / `n` | `y` (interactive) / `n` (non-interactive) |
+| Include Risky Images | `y` / `n` | `n` |
 | Risk severity | `Critical`, `High`, `Medium`, `Low`, `Informational` (comma-separated) | `High` |
 | Risk status | `Open`, `Closed`, `all` | `Open` |
 | Risk cloud provider | `aws`, `azure`, `gcp`, `all` | `all` |
 | IOA severity | Any severity above, or `all` | `all` |
 | Package severity | Any severity above, or `all` | `Critical` |
+| Risky Images CVE severity | Any severity above, or `all` | `Critical` |
+| Max Risky Images | Any positive integer | `10` |
 | VM providers | `AWS`, `Azure`, `GCP` (comma-separated) | `AWS,Azure,GCP` |
 | IOM categories | Any category below, comma-separated, `all`, or `none` | `none` |
 | IOM severity | Any severity above, or `all` | `all` |
@@ -181,7 +191,7 @@ Running without `-i` uses these defaults (or saved defaults from `.report_defaul
 
 | Setting | Default value |
 |---|---|
-| Sections | Risks, IOAs, VMs included; AI Packages and IOMs excluded |
+| Sections | Risks, IOAs, VMs included; AI Packages, Risky Images, and IOMs excluded |
 | Risk severity | High |
 | Risk status | Open |
 | Risk cloud provider | all |
