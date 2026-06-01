@@ -125,15 +125,30 @@ AMBER      = (200, 130, 0)
 SECTION_BG = (245, 245, 245)
 LINK_BLUE  = (0,   102, 204)
 
-# ANSI terminal colors
-T_RESET  = "\033[0m"
-T_BOLD   = "\033[1m"
-T_DIM    = "\033[2m"
-T_RED    = "\033[91m"
-T_YELLOW = "\033[93m"
-T_CYAN   = "\033[96m"
-T_WHITE  = "\033[97m"
-T_GRAY   = "\033[90m"
+# ANSI terminal colors (256-color palette)
+T_RESET    = "\033[0m"
+T_BOLD     = "\033[1m"
+T_DIM      = "\033[2m"
+T_BRAND    = "\033[38;5;203m"   # salmon-red  (CrowdStrike brand)
+T_HEADER   = "\033[38;5;215m"   # warm amber
+T_ACCENT   = "\033[38;5;86m"    # mint green
+T_LABEL    = "\033[38;5;110m"   # periwinkle
+T_VALUE    = "\033[38;5;255m"   # near-white
+T_MUTED    = "\033[38;5;242m"   # slate gray
+T_HINT     = "\033[38;5;68m"    # steel blue
+T_SUCCESS  = "\033[38;5;120m"   # soft green
+T_WARN     = "\033[38;5;220m"   # golden yellow
+T_CRITICAL = "\033[38;5;196m"
+T_HIGH     = "\033[38;5;208m"
+T_MEDIUM   = "\033[38;5;226m"
+T_LOW      = "\033[38;5;117m"
+T_INFO_SEV = "\033[38;5;244m"
+# Backwards-compat aliases
+T_RED    = T_CRITICAL
+T_YELLOW = T_WARN
+T_CYAN   = T_ACCENT
+T_WHITE  = T_VALUE
+T_GRAY   = T_MUTED
 
 DEBUG = False
 
@@ -156,10 +171,24 @@ def dbg_response(label, r):
 
 # --- Interactive configuration ---
 
+def t_severity(sev):
+    col = {"critical": T_CRITICAL, "high": T_HIGH, "medium": T_MEDIUM,
+           "low": T_LOW, "informational": T_INFO_SEV}.get((sev or "").lower(), T_VALUE)
+    return f"{T_BOLD}{col}{sev}{T_RESET}"
+
+
+def _banner(title, count=None):
+    W = 64
+    count_str = f"  {T_SUCCESS}{count}{T_RESET}{T_HEADER}" if count is not None else ""
+    print(f"\n{T_BOLD}{T_HEADER}{'━' * W}{T_RESET}")
+    print(f"{T_BOLD}{T_HEADER}  {title}{count_str}{T_RESET}")
+    print(f"{T_BOLD}{T_HEADER}{'━' * W}{T_RESET}")
+
+
 def _prompt(label, default=""):
-    display_default = f" [{default}]" if default else ""
+    display_default = f"  {T_MUTED}[{T_HEADER}{default}{T_MUTED}]{T_RESET}" if default else ""
     try:
-        val = input(f"  {T_GRAY}{label}{display_default}:{T_RESET} {T_WHITE}").strip()
+        val = input(f"  {T_LABEL}{label}{display_default}{T_RESET}  {T_VALUE}").strip()
         print(T_RESET, end="", flush=True)
         return val if val else default
     except (EOFError, KeyboardInterrupt):
@@ -174,12 +203,15 @@ def _prompt_yn(label, default=True):
 
 
 def interactive_config():
-    print(f"\n{T_BOLD}{T_CYAN}Falcon Cloud Security Report -- Configuration{T_RESET}")
-    print(f"{T_GRAY}Press Enter to accept defaults.{T_RESET}\n")
+    W = 58
+    print(f"\n{T_BOLD}{T_BRAND}  {'─' * W}{T_RESET}")
+    print(f"{T_BOLD}{T_BRAND}  Falcon Cloud Security  ·  Report Configuration{T_RESET}")
+    print(f"{T_MUTED}  Press Enter to accept the default shown in [ ]{T_RESET}")
+    print(f"{T_BOLD}{T_BRAND}  {'─' * W}{T_RESET}\n")
 
     config = {}
 
-    print(f"  {T_BOLD}Sections{T_RESET}")
+    print(f"  {T_BOLD}{T_HEADER}▸ Sections{T_RESET}")
     config["include_risks"] = _prompt_yn("Include Cloud Risks", default=True)
     config["include_ioas"]  = _prompt_yn("Include Cloud IOA Detections", default=True)
     config["include_vms"]   = _prompt_yn("Include Unmanaged Virtual Machines", default=True)
@@ -187,26 +219,26 @@ def interactive_config():
     print()
 
     if config["include_risks"]:
-        print(f"  {T_BOLD}Risk Filters{T_RESET}")
-        print(f"  {T_GRAY}Available severities: {', '.join(VALID_SEVERITIES)}{T_RESET}")
+        print(f"  {T_BOLD}{T_HEADER}▸ Risk Filters{T_RESET}")
+        print(f"  {T_HINT}Available severities: {', '.join(VALID_SEVERITIES)}{T_RESET}")
         sev_raw = _prompt("Severity (comma-separated)", "High")
         sevs = [s.strip().capitalize() for s in sev_raw.split(",") if s.strip()]
         config["severities"] = [s for s in sevs if s in VALID_SEVERITIES] or ["High"]
 
-        print(f"  {T_GRAY}Available statuses: Open, Closed, all{T_RESET}")
+        print(f"  {T_HINT}Available statuses: Open, Closed, all{T_RESET}")
         status_raw = _prompt("Status", "Open")
         status_val = status_raw.strip().capitalize() if status_raw.strip() else "Open"
         config["status"] = status_val if status_val in ("Open", "Closed") else "all"
 
-        print(f"  {T_GRAY}Available providers: {', '.join(VALID_PROVIDERS)}, all{T_RESET}")
+        print(f"  {T_HINT}Available providers: {', '.join(VALID_PROVIDERS)}, all{T_RESET}")
         prov_raw = _prompt("Cloud provider", "all")
         prov = prov_raw.strip().lower()
         config["risk_provider"] = prov if prov in VALID_PROVIDERS else "all"
         print()
 
     if config["include_ioas"]:
-        print(f"  {T_BOLD}Cloud IOA Filters{T_RESET}")
-        print(f"  {T_GRAY}Available severities: {', '.join(VALID_SEVERITIES)}, all{T_RESET}")
+        print(f"  {T_BOLD}{T_HEADER}▸ Cloud IOA Filters{T_RESET}")
+        print(f"  {T_HINT}Available severities: {', '.join(VALID_SEVERITIES)}, all{T_RESET}")
         ioa_sev_raw = _prompt("IOA severity (comma-separated, or all)", "all")
         if not ioa_sev_raw.strip() or ioa_sev_raw.strip().lower() == "all":
             config["ioa_severities"] = []
@@ -216,8 +248,8 @@ def interactive_config():
         print()
 
     if config["include_ai_packages"]:
-        print(f"  {T_BOLD}AI Package Filters{T_RESET}")
-        print(f"  {T_GRAY}Available severities: {', '.join(VALID_SEVERITIES)}, all{T_RESET}")
+        print(f"  {T_BOLD}{T_HEADER}▸ AI Package Filters{T_RESET}")
+        print(f"  {T_HINT}Available severities: {', '.join(VALID_SEVERITIES)}, all{T_RESET}")
         ai_sev_raw = _prompt("Package severity (comma-separated, or all)", "Critical")
         if not ai_sev_raw.strip() or ai_sev_raw.strip().lower() == "all":
             config["ai_package_severities"] = []
@@ -227,18 +259,18 @@ def interactive_config():
         print()
 
     if config["include_vms"]:
-        print(f"  {T_BOLD}VM Filters{T_RESET}")
-        print(f"  {T_GRAY}Available providers: AWS, Azure, GCP{T_RESET}")
+        print(f"  {T_BOLD}{T_HEADER}▸ VM Filters{T_RESET}")
+        print(f"  {T_HINT}Available providers: AWS, Azure, GCP{T_RESET}")
         vm_prov_raw = _prompt("VM providers (comma-separated)", "AWS,Azure,GCP")
         _norm = {"aws": "AWS", "azure": "Azure", "gcp": "GCP"}
         vm_provs = [p.strip() for p in vm_prov_raw.split(",") if p.strip()]
         config["vm_providers"] = [_norm[p.lower()] for p in vm_provs if p.lower() in _norm] or ["AWS", "Azure", "GCP"]
         print()
 
-    print(f"  {T_BOLD}IOM Filters{T_RESET}")
+    print(f"  {T_BOLD}{T_HEADER}▸ IOM / Misconfiguration Filters{T_RESET}")
     _cat_list = ", ".join(VALID_IOM_CATEGORIES)
-    print(f"  {T_GRAY}Available categories: {_cat_list}{T_RESET}")
-    print(f"  {T_GRAY}Enter 'none' or leave blank to skip the IOM section.{T_RESET}")
+    print(f"  {T_HINT}Available categories: {_cat_list}{T_RESET}")
+    print(f"  {T_HINT}Enter 'none' or leave blank to skip the IOM section.{T_RESET}")
     iom_raw = _prompt("IOM categories (comma-separated, all, or none)", "none")
     iom_val = iom_raw.strip().lower()
     if not iom_val or iom_val == "none":
@@ -250,7 +282,7 @@ def interactive_config():
         config["iom_categories"] = [c for c in cats if c in IOM_CATEGORIES] or []
 
     if config["iom_categories"]:
-        print(f"  {T_GRAY}Available severities: {', '.join(VALID_SEVERITIES)}{T_RESET}")
+        print(f"  {T_HINT}Available severities: {', '.join(VALID_SEVERITIES)}{T_RESET}")
         iom_sev_raw = _prompt("IOM severity filter (comma-separated, or all)", "all")
         if not iom_sev_raw.strip() or iom_sev_raw.strip().lower() == "all":
             config["iom_severities"] = []
@@ -259,7 +291,7 @@ def interactive_config():
             config["iom_severities"] = [s for s in sevs if s in VALID_SEVERITIES]
     print()
 
-    print(f"  {T_BOLD}Output{T_RESET}")
+    print(f"  {T_BOLD}{T_HEADER}▸ Output{T_RESET}")
     config["output_file"] = ensure_timestamped_filename(_prompt("Output filename", OUTPUT_FILE))
     print()
 
@@ -267,7 +299,7 @@ def interactive_config():
 
     if _prompt_yn("Save as new defaults", default=False):
         _save_defaults(merged)
-        print(f"  {T_GRAY}Defaults saved to {DEFAULTS_FILE}{T_RESET}\n")
+        print(f"  {T_MUTED}Defaults saved to {DEFAULTS_FILE}{T_RESET}\n")
 
     return merged
 
@@ -705,171 +737,146 @@ def fetch_ioms(csd, categories, severities=None):
     return result
 
 def t_label(text):
-    return f"{T_GRAY}{text}{T_RESET}"
+    return f"{T_LABEL}{text}{T_RESET}"
 
 
 def print_risks(risks):
-    width = 64
-    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}  FALCON CLOUD SECURITY -- CLOUD RISKS{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
-    print(f"  {t_label('Total risks found:')} {T_BOLD}{T_WHITE}{len(risks)}{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
+    _banner("CLOUD RISKS", len(risks))
 
     if not risks:
-        print(f"\n  {T_YELLOW}No risks found matching the filter.{T_RESET}\n")
+        print(f"\n  {T_WARN}No risks found matching the filter.{T_RESET}\n")
         return
 
     for i, risk in enumerate(risks, 1):
-        print(f"\n  {T_BOLD}{T_WHITE}[{i} of {len(risks)}]{T_RESET}")
-        print(f"  {t_label('Rule:     ')} {T_BOLD}{T_WHITE}{risk.get('rule_name', 'N/A')}{T_RESET}")
-        print(f"  {t_label('Desc:     ')} {T_WHITE}{risk.get('rule_description', 'N/A')}{T_RESET}")
-        print(f"  {t_label('Severity: ')} {T_BOLD}{T_RED}{risk.get('severity', 'N/A')}{T_RESET}")
-        print(f"  {t_label('Status:   ')} {T_BOLD}{T_YELLOW}{risk.get('status', 'N/A')}{T_RESET}")
-        print(f"  {t_label('Asset:    ')} {T_CYAN}{risk.get('asset_name', 'N/A')}{T_GRAY} ({risk.get('asset_type', 'N/A')}){T_RESET}")
-        print(f"  {t_label('Provider: ')} {T_BOLD}{T_WHITE}{(risk.get('cloud_provider') or '').upper()}{T_RESET}")
-        print(f"  {t_label('Account:  ')} {T_WHITE}{risk.get('account_name', 'N/A')}{T_GRAY} ({risk.get('account_id', 'N/A')}){T_RESET}")
-        print(f"  {t_label('Region:   ')} {T_WHITE}{risk.get('asset_region', 'N/A')}{T_RESET}")
-        print(f"  {t_label('Category: ')} {T_WHITE}{risk.get('service_category', 'N/A')}{T_RESET}")
-        print(f"  {t_label('First Seen:')} {T_DIM}{T_WHITE}{risk.get('first_seen', 'N/A')}{T_RESET}")
-        print(f"  {t_label('Last Seen: ')} {T_DIM}{T_WHITE}{risk.get('last_seen', 'N/A')}{T_RESET}")
+        print(f"\n  {T_BOLD}{T_VALUE}[{i} of {len(risks)}]{T_RESET}")
+        print(f"  {t_label('Rule:     ')} {T_BOLD}{T_VALUE}{risk.get('rule_name', 'N/A')}{T_RESET}")
+        print(f"  {t_label('Desc:     ')} {T_VALUE}{risk.get('rule_description', 'N/A')}{T_RESET}")
+        print(f"  {t_label('Severity: ')} {t_severity(risk.get('severity', 'N/A'))}")
+        print(f"  {t_label('Status:   ')} {T_BOLD}{T_WARN}{risk.get('status', 'N/A')}{T_RESET}")
+        print(f"  {t_label('Asset:    ')} {T_ACCENT}{risk.get('asset_name', 'N/A')}{T_MUTED} ({risk.get('asset_type', 'N/A')}){T_RESET}")
+        print(f"  {t_label('Provider: ')} {T_BOLD}{T_VALUE}{(risk.get('cloud_provider') or '').upper()}{T_RESET}")
+        print(f"  {t_label('Account:  ')} {T_VALUE}{risk.get('account_name', 'N/A')}{T_MUTED} ({risk.get('account_id', 'N/A')}){T_RESET}")
+        print(f"  {t_label('Region:   ')} {T_VALUE}{risk.get('asset_region', 'N/A')}{T_RESET}")
+        print(f"  {t_label('Category: ')} {T_VALUE}{risk.get('service_category', 'N/A')}{T_RESET}")
+        print(f"  {t_label('First Seen:')} {T_MUTED}{risk.get('first_seen', 'N/A')}{T_RESET}")
+        print(f"  {t_label('Last Seen: ')} {T_MUTED}{risk.get('last_seen', 'N/A')}{T_RESET}")
 
         risk_factors = risk.get("risk_factors") or risk.get("risk_factor") or []
         if risk_factors:
-            print(f"\n  {T_BOLD}{T_CYAN}  Risk Factors{T_RESET}")
+            print(f"\n  {T_BOLD}{T_ACCENT}  Risk Factors{T_RESET}")
             for factor in risk_factors:
-                print(f"\n    {T_BOLD}{T_WHITE}{factor.get('insight_name', 'N/A')}{T_RESET}")
+                print(f"\n    {T_BOLD}{T_VALUE}{factor.get('insight_name', 'N/A')}{T_RESET}")
                 for remediation in factor.get("remediation") or []:
-                    print(f"\n      {T_BOLD}{T_YELLOW}{remediation.get('title', '')}{T_RESET}")
+                    print(f"\n      {T_BOLD}{T_WARN}{remediation.get('title', '')}{T_RESET}")
                     for line in remediation.get("content", "").splitlines():
                         for wrapped_line in textwrap.wrap(line, width=56) or [""]:
-                            print(f"      {T_DIM}{T_WHITE}{wrapped_line}{T_RESET}")
+                            print(f"      {T_DIM}{T_VALUE}{wrapped_line}{T_RESET}")
 
-        print(f"\n  {T_GRAY}{'-' * (width - 2)}{T_RESET}")
+        print(f"\n  {T_MUTED}{'─' * 62}{T_RESET}")
     print()
 
 
 def print_cloud_ioas(ioas):
-    width = 64
-    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}  CLOUD IOA DETECTIONS{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
-    print(f"  {t_label('Total IOAs found:')} {T_BOLD}{T_WHITE}{len(ioas)}{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
+    _banner("CLOUD IOA DETECTIONS", len(ioas))
 
     if not ioas:
-        print(f"\n  {T_YELLOW}No Cloud IOA detections found.{T_RESET}\n")
+        print(f"\n  {T_WARN}No Cloud IOA detections found.{T_RESET}\n")
         return
 
     for i, ioa in enumerate(ioas, 1):
-        print(f"\n  {T_BOLD}{T_WHITE}[{i} of {len(ioas)}]{T_RESET}")
-        print(f"  {t_label('Name:     ')} {T_BOLD}{T_WHITE}{ioa.get('display_name', 'N/A')}{T_RESET}")
-        print(f"  {t_label('Severity: ')} {T_BOLD}{T_RED}{ioa.get('severity_name', 'N/A')}{T_RESET}")
-        print(f"  {t_label('Provider: ')} {T_BOLD}{T_WHITE}{(ioa.get('cloud_provider') or '').upper()}{T_RESET}")
-        print(f"  {t_label('Account:  ')} {T_WHITE}{ioa.get('cloud_account_id', 'N/A')}{T_RESET}")
-        print(f"  {t_label('Region:   ')} {T_WHITE}{ioa.get('cloud_region', 'N/A')}{T_RESET}")
-        print(f"  {t_label('Service:  ')} {T_WHITE}{ioa.get('service', 'N/A')}{T_RESET}")
-        tactic = ioa.get('tactic', 'N/A')
-        technique = ioa.get('technique', 'N/A')
-        print(f"  {t_label('Tactic:   ')} {T_WHITE}{tactic}{T_RESET}")
-        print(f"  {t_label('Technique:')} {T_WHITE}{technique}{T_RESET}")
-        print(f"  {t_label('User:     ')} {T_WHITE}{ioa.get('user_display_name', 'N/A')}{T_RESET}")
-        print(f"  {t_label('Timestamp:')} {T_DIM}{T_WHITE}{ioa.get('timestamp', 'N/A')}{T_RESET}")
+        print(f"\n  {T_BOLD}{T_VALUE}[{i} of {len(ioas)}]{T_RESET}")
+        print(f"  {t_label('Name:     ')} {T_BOLD}{T_VALUE}{ioa.get('display_name', 'N/A')}{T_RESET}")
+        print(f"  {t_label('Severity: ')} {t_severity(ioa.get('severity_name', 'N/A'))}")
+        print(f"  {t_label('Provider: ')} {T_BOLD}{T_VALUE}{(ioa.get('cloud_provider') or '').upper()}{T_RESET}")
+        print(f"  {t_label('Account:  ')} {T_VALUE}{ioa.get('cloud_account_id', 'N/A')}{T_RESET}")
+        print(f"  {t_label('Region:   ')} {T_VALUE}{ioa.get('cloud_region', 'N/A')}{T_RESET}")
+        print(f"  {t_label('Service:  ')} {T_VALUE}{ioa.get('service', 'N/A')}{T_RESET}")
+        print(f"  {t_label('Tactic:   ')} {T_VALUE}{ioa.get('tactic', 'N/A')}{T_RESET}")
+        print(f"  {t_label('Technique:')} {T_VALUE}{ioa.get('technique', 'N/A')}{T_RESET}")
+        print(f"  {t_label('User:     ')} {T_VALUE}{ioa.get('user_display_name', 'N/A')}{T_RESET}")
+        print(f"  {t_label('Timestamp:')} {T_MUTED}{ioa.get('timestamp', 'N/A')}{T_RESET}")
         desc = ioa.get('description', '')
         if desc:
-            print(f"  {t_label('Desc:     ')} {T_WHITE}{desc[:120]}{'...' if len(desc) > 120 else ''}{T_RESET}")
-        print(f"\n  {T_GRAY}{'-' * (width - 2)}{T_RESET}")
+            print(f"  {t_label('Desc:     ')} {T_VALUE}{desc[:120]}{'...' if len(desc) > 120 else ''}{T_RESET}")
+        print(f"\n  {T_MUTED}{'─' * 62}{T_RESET}")
     print()
 
 
 def print_vms(vm_data):
-    width = 64
-    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}  UNMANAGED RUNNING VMs{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}\n")
+    _banner("UNMANAGED RUNNING VMs")
 
     for provider, assets in vm_data.items():
-        print(f"  {T_BOLD}{T_WHITE}{provider}{T_RESET}{T_GRAY}  --  {len(assets)} asset(s){T_RESET}")
+        print(f"\n  {T_BOLD}{T_HEADER}{provider}{T_RESET}  {T_MUTED}{len(assets)} asset(s){T_RESET}")
         if not assets:
-            print(f"  {T_YELLOW}  No assets found.{T_RESET}\n")
+            print(f"  {T_WARN}  No assets found.{T_RESET}\n")
             continue
-        print(f"  {T_GRAY}{'Resource ID':<45}  Account ID{T_RESET}")
-        print(f"  {T_GRAY}{'-' * (width - 2)}{T_RESET}")
+        print(f"  {T_MUTED}{'Resource ID':<45}  Account ID{T_RESET}")
+        print(f"  {T_MUTED}{'─' * 62}{T_RESET}")
         for asset in assets:
-            print(f"  {T_CYAN}{asset.get('resource_id', 'N/A'):<45}{T_RESET}  {T_WHITE}{asset.get('account_id', 'N/A')}{T_RESET}")
+            print(f"  {T_ACCENT}{asset.get('resource_id', 'N/A'):<45}{T_RESET}  {T_VALUE}{asset.get('account_id', 'N/A')}{T_RESET}")
         print()
 
 
 def print_ai_packages(packages):
-    width = 64
-    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}  AI PACKAGE RISKS -- CRITICAL CVEs{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
-    print(f"  {t_label('Packages with Critical CVEs:')} {T_BOLD}{T_WHITE}{len(packages)}{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
+    _banner("AI PACKAGE RISKS — CRITICAL CVEs", len(packages))
 
     if not packages:
-        print(f"\n  {T_YELLOW}No AI-related packages with Critical CVEs found.{T_RESET}\n")
+        print(f"\n  {T_WARN}No AI-related packages with Critical CVEs found.{T_RESET}\n")
         return
 
     for i, pkg in enumerate(packages, 1):
         vulns = pkg["critical_vulnerabilities"]
         images = pkg.get("images") or []
-        print(f"\n  {T_BOLD}{T_WHITE}[{i} of {len(packages)}]{T_RESET}")
-        print(f"  {t_label('Package:  ')} {T_BOLD}{T_WHITE}{pkg['package_name_version']}{T_RESET}")
-        print(f"  {t_label('Type:     ')} {T_WHITE}{pkg['type']}{T_RESET}")
-        print(f"  {t_label('Images:   ')} {T_WHITE}{pkg['all_images']} total  |  {pkg['running_images']} running{T_RESET}")
+        print(f"\n  {T_BOLD}{T_VALUE}[{i} of {len(packages)}]{T_RESET}")
+        print(f"  {t_label('Package:  ')} {T_BOLD}{T_VALUE}{pkg['package_name_version']}{T_RESET}")
+        print(f"  {t_label('Type:     ')} {T_VALUE}{pkg['type']}{T_RESET}")
+        print(f"  {t_label('Images:   ')} {T_VALUE}{pkg['all_images']} total  |  {pkg['running_images']} running{T_RESET}")
         if images:
             for img_name in images:
-                print(f"              {T_DIM}{T_WHITE}{img_name}{T_RESET}")
-        print(f"  {t_label('Critical: ')} {T_BOLD}{T_RED}{len(vulns)} CVE(s){T_RESET}")
+                print(f"              {T_MUTED}{img_name}{T_RESET}")
+        print(f"  {t_label('Critical: ')} {T_BOLD}{T_CRITICAL}{len(vulns)} CVE(s){T_RESET}")
         for v in vulns:
             fix = v.get("fix_resolution") or []
             fix_str = ", ".join(fix) if fix else "No fix available"
-            print(f"\n    {T_BOLD}{T_RED}{v.get('cveid', 'N/A')}{T_RESET}")
-            print(f"    {t_label('Fix:      ')} {T_YELLOW}{fix_str}{T_RESET}")
+            print(f"\n    {T_BOLD}{T_CRITICAL}{v.get('cveid', 'N/A')}{T_RESET}")
+            print(f"    {t_label('Fix:      ')} {T_WARN}{fix_str}{T_RESET}")
             desc = (v.get("description") or "").strip()
             if desc:
                 short = desc[:160].replace("\n", " ")
-                print(f"    {t_label('Desc:     ')} {T_DIM}{T_WHITE}{short}{'...' if len(desc) > 160 else ''}{T_RESET}")
-        print(f"\n  {T_GRAY}{'-' * (width - 2)}{T_RESET}")
+                print(f"    {t_label('Desc:     ')} {T_MUTED}{short}{'...' if len(desc) > 160 else ''}{T_RESET}")
+        print(f"\n  {T_MUTED}{'─' * 62}{T_RESET}")
     print()
 
 
 def print_ai_ioms(ioms):
-    width = 64
-    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}  AI CLOUD SERVICES -- ACTIVE MISCONFIGURATIONS{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
-    print(f"  {t_label('Active misconfigurations:')} {T_BOLD}{T_RED}{len(ioms)}{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
+    _banner("AI CLOUD SERVICES — ACTIVE MISCONFIGURATIONS", len(ioms))
 
     if not ioms:
-        print(f"\n  {T_YELLOW}No active AI service misconfigurations found.{T_RESET}\n")
+        print(f"\n  {T_WARN}No active AI service misconfigurations found.{T_RESET}\n")
         return
 
     for i, iom in enumerate(ioms, 1):
-        print(f"\n  {T_BOLD}{T_WHITE}[{i} of {len(ioms)}]{T_RESET}")
-        print(f"  {t_label('Resource:     ')} {T_BOLD}{T_CYAN}{iom['resource_id']}{T_RESET}")
-        print(f"  {t_label('Type:         ')} {T_WHITE}{iom['resource_type']}{T_DIM}  [{iom.get('resource_type_raw', '')}]{T_RESET}")
-        print(f"  {t_label('Service:      ')} {T_WHITE}{iom['service']}{T_RESET}")
-        print(f"  {t_label('Provider:     ')} {T_BOLD}{T_WHITE}{iom['provider']}{T_RESET}")
-        print(f"  {t_label('Account:      ')} {T_WHITE}{iom['account_name']}{T_GRAY} ({iom['account_id']}){T_RESET}")
-        print(f"  {t_label('Region:       ')} {T_WHITE}{iom['region']}{T_RESET}")
-        print(f"  {t_label('Rule:         ')} {T_BOLD}{T_WHITE}{iom['rule_name']}{T_RESET}")
-        print(f"  {t_label('Severity:     ')} {T_BOLD}{T_RED}{iom['severity']}{T_RESET}")
+        print(f"\n  {T_BOLD}{T_VALUE}[{i} of {len(ioms)}]{T_RESET}")
+        print(f"  {t_label('Resource:     ')} {T_BOLD}{T_ACCENT}{iom['resource_id']}{T_RESET}")
+        print(f"  {t_label('Type:         ')} {T_VALUE}{iom['resource_type']}{T_MUTED}  [{iom.get('resource_type_raw', '')}]{T_RESET}")
+        print(f"  {t_label('Service:      ')} {T_VALUE}{iom['service']}{T_RESET}")
+        print(f"  {t_label('Provider:     ')} {T_BOLD}{T_VALUE}{iom['provider']}{T_RESET}")
+        print(f"  {t_label('Account:      ')} {T_VALUE}{iom['account_name']}{T_MUTED} ({iom['account_id']}){T_RESET}")
+        print(f"  {t_label('Region:       ')} {T_VALUE}{iom['region']}{T_RESET}")
+        print(f"  {t_label('Rule:         ')} {T_BOLD}{T_VALUE}{iom['rule_name']}{T_RESET}")
+        print(f"  {t_label('Severity:     ')} {t_severity(iom['severity'])}")
         if iom.get("description"):
             desc = iom["description"][:160].replace("\n", " ")
-            print(f"  {t_label('Description:  ')} {T_WHITE}{desc}{T_RESET}")
+            print(f"  {t_label('Description:  ')} {T_VALUE}{desc}{T_RESET}")
         if iom.get("remediation"):
             steps = iom["remediation"].split("|\n")
-            print(f"\n  {T_BOLD}{T_CYAN}  Remediation{T_RESET}")
+            print(f"\n  {T_BOLD}{T_ACCENT}  Remediation{T_RESET}")
             for step in steps:
                 step = step.strip()
                 if step:
                     for wrapped in textwrap.wrap(step, width=56) or [step]:
-                        print(f"    {T_DIM}{T_WHITE}{wrapped}{T_RESET}")
-        print(f"\n  {T_GRAY}{'-' * (width - 2)}{T_RESET}")
+                        print(f"    {T_MUTED}{wrapped}{T_RESET}")
+        print(f"\n  {T_MUTED}{'─' * 62}{T_RESET}")
     print()
 
 def _arn_name(rid):
@@ -1694,31 +1701,32 @@ if __name__ == "__main__":
 
     risks = []
     if config["include_risks"]:
-        print(f"\n{T_DIM}Fetching risks:  {risks_filter}{T_RESET}")
+        print(f"\n{T_HINT}  Fetching risks...{T_RESET}")
         risks = fetch_all_risks(cs, risks_filter)
-        print(f"{T_DIM}  Found {len(risks)} risk(s).{T_RESET}\n")
+        print(f"{T_SUCCESS}  ✓ {len(risks)} risk(s) found.{T_RESET}\n")
 
     ioas = []
     if config["include_ioas"]:
-        print(f"{T_DIM}Fetching cloud IOAs...{T_RESET}")
+        print(f"{T_HINT}  Fetching Cloud IOAs...{T_RESET}")
         ioas = fetch_cloud_ioas(alerts, config.get("ioa_severities", []))
-        print(f"{T_DIM}  Found {len(ioas)} Cloud IOA(s).{T_RESET}\n")
+        print(f"{T_SUCCESS}  ✓ {len(ioas)} Cloud IOA(s) found.{T_RESET}\n")
 
     vm_data = {}
     if config["include_vms"]:
         for provider, vm_filter in vm_filters:
-            print(f"{T_DIM}Fetching VMs:    {vm_filter}{T_RESET}")
+            print(f"{T_HINT}  Fetching VMs  {T_MUTED}({provider}){T_RESET}")
             assets = fetch_unmanaged_vms(csa, vm_filter)
-            print(f"{T_DIM}  Found {len(assets)} unmanaged Virtual Machine(s) for {provider}.{T_RESET}")
             vm_data[provider] = assets
+            print(f"{T_SUCCESS}  ✓ {len(assets)} unmanaged VM(s) — {provider}.{T_RESET}")
+        print()
 
     ai_packages = []
     if config["include_ai_packages"]:
         ai_sevs = config.get("ai_package_severities", ["Critical"])
         sev_label = ", ".join(ai_sevs) if ai_sevs else "all severities"
-        print(f"{T_DIM}Fetching AI-related packages ({sev_label})...{T_RESET}")
+        print(f"{T_HINT}  Fetching AI packages  {T_MUTED}({sev_label}){T_RESET}")
         ai_packages = fetch_ai_critical_packages(cp, ci, ai_sevs)
-        print(f"{T_DIM}  Found {len(ai_packages)} AI package(s) matching filter.{T_RESET}")
+        print(f"{T_SUCCESS}  ✓ {len(ai_packages)} AI package(s) found.{T_RESET}")
 
     ioms = []
     iom_cats = config.get("iom_categories", [])
@@ -1726,9 +1734,9 @@ if __name__ == "__main__":
         iom_sevs = config.get("iom_severities", [])
         cat_label = "all categories" if "all" in iom_cats else ", ".join(iom_cats)
         sev_label = ", ".join(iom_sevs) if iom_sevs else "all severities"
-        print(f"{T_DIM}Fetching IOMs ({cat_label} / {sev_label})...{T_RESET}")
+        print(f"{T_HINT}  Fetching IOMs  {T_MUTED}({cat_label} / {sev_label}){T_RESET}")
         ioms = fetch_ioms(csd, iom_cats, iom_sevs)
-        print(f"{T_DIM}  Found {len(ioms)} active misconfiguration(s).{T_RESET}")
+        print(f"{T_SUCCESS}  ✓ {len(ioms)} misconfiguration(s) found.{T_RESET}")
 
     print()
     if config["include_risks"]:
@@ -1742,5 +1750,5 @@ if __name__ == "__main__":
     if iom_cats:
         print_ai_ioms(ioms)
 
-    print(f"{T_DIM}Building PDF...{T_RESET}")
+    print(f"\n{T_HINT}  Building PDF...{T_RESET}")
     build_pdf(risks, ioas, vm_data, ai_packages, ioms, config)
