@@ -1122,6 +1122,47 @@ def _console_url(iom):
     return ""
 
 
+def _render_toc(pdf, outline):
+    W = pdf.epw
+    pdf.set_y(pdf.t_margin + 6)
+
+    # Title
+    pdf.set_font("Helvetica", "B", 20)
+    pdf.set_text_color(*CS_RED)
+    pdf.cell(0, 14, "Contents", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.ln(2)
+
+    # Red rule under title
+    pdf.set_draw_color(*CS_RED)
+    pdf.set_line_width(0.5)
+    pdf.line(pdf.l_margin, pdf.get_y(), pdf.l_margin + W, pdf.get_y())
+    pdf.ln(8)
+
+    for idx, section in enumerate(outline):
+        link_id = pdf.add_link(page=section.page_number)
+        name    = sanitize(section.name)
+        pg_str  = str(section.page_number)
+
+        # Alternating row tint
+        if idx % 2 == 0:
+            pdf.set_fill_color(*SECTION_BG)
+            pdf.rect(pdf.l_margin, pdf.get_y(), W, 11, "F")
+
+        # Section name (clickable)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(*DARK)
+        pdf.set_x(pdf.l_margin + 3)
+        pdf.cell(W - 20, 11, name, link=link_id)
+
+        # Page number (amber, right-aligned, clickable)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(*AMBER)
+        pdf.cell(20, 11, pg_str, align="R", link=link_id,
+                 new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+        pdf.ln(3)
+
+
 class FalconReport(FPDF):
     LABEL_W = 34
 
@@ -1180,11 +1221,17 @@ class FalconReport(FPDF):
             self.ln(2)
 
         if vm_totals:
+            total_vms = sum(vm_totals.values())
+            self.set_font("Helvetica", "B", 10)
+            self.set_text_color(*LIGHT_GRAY)
+            self.cell(0, 8, f"Unmanaged Virtual Machines:  {total_vms}", align="C",
+                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             for provider, count in vm_totals.items():
-                self.set_font("Helvetica", "", 9)
+                self.set_font("Helvetica", "", 8)
                 self.set_text_color(*MID_GRAY)
-                self.cell(0, 7, f"Unmanaged Virtual Machines ({provider}):  {count}", align="C",
+                self.cell(0, 5, f"({provider}: {count})", align="C",
                           new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.ln(2)
 
         if ai_packages_count is not None:
             self.set_font("Helvetica", "B", 10)
@@ -1599,8 +1646,23 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
         filter_desc=fdesc,
     )
 
+    # TOC placeholder on page 2; insert_toc_placeholder advances to page 3
+    pdf.add_page()
+    pdf.insert_toc_placeholder(_render_toc, pages=1)
+
+    # Helper: first content section reuses page 3 (already advanced by insert_toc_placeholder);
+    # subsequent sections each start a new page.
+    _first_section = [True]
+
+    def _begin_section(title):
+        if _first_section[0]:
+            _first_section[0] = False
+        else:
+            pdf.add_page()
+        pdf.start_section(title)
+
     if config.get("include_risks"):
-        pdf.add_page()
+        _begin_section(f"Cloud Risks  ({len(risks)} total)")
         pdf.section_header(f"Cloud Risks  ({len(risks)} total)")
         if not risks:
             pdf.set_font("Helvetica", "", 9)
@@ -1612,7 +1674,7 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
                 pdf.risk_card(i, len(risks), risk)
 
     if config.get("include_ioas"):
-        pdf.add_page()
+        _begin_section(f"Cloud IOA Detections  ({len(ioas)} total)")
         pdf.section_header(f"Cloud IOA Detections  ({len(ioas)} total)")
         if not ioas:
             pdf.set_font("Helvetica", "", 9)
@@ -1624,7 +1686,7 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
                 pdf.ioa_card(i, len(ioas), ioa)
 
     if config.get("include_ai_packages"):
-        pdf.add_page()
+        _begin_section(f"AI Package Risks — Critical CVEs  ({len(ai_packages)} packages)")
         pdf.section_header(f"AI Package Risks -- Critical CVEs  ({len(ai_packages)} packages)")
         if not ai_packages:
             pdf.set_font("Helvetica", "", 9)
@@ -1636,7 +1698,7 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
                 pdf.ai_package_card(i, len(ai_packages), pkg)
 
     if iom_cats:
-        pdf.add_page()
+        _begin_section(f"Cloud Service IOMs  ({len(ioms)} total)")
         section_title = f"Cloud Service IOMs  ({len(ioms)} total)  -  {ioms_label}"
         pdf.section_header(section_title)
         if not ioms:
@@ -1649,8 +1711,8 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
                 pdf.ai_iom_card(i, len(ioms), iom)
 
     if config.get("include_vms"):
-        pdf.add_page()
         total_vms = sum(vm_totals.values())
+        _begin_section(f"Unmanaged Virtual Machines  ({total_vms} total)")
         pdf.section_header(f"Unmanaged Virtual Machines  ({total_vms} total)")
         for provider, assets in vm_data.items():
             pdf.sub_header(f"{provider}  -  {len(assets)} asset(s)")
