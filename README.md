@@ -12,10 +12,10 @@ A single PDF with a cover page, a clickable table of contents, and four logical 
 |---|---|
 | **Cover** | Section counts, active filter summary, and generation timestamp |
 | **Table of Contents** | Clickable page-linked index of every included subsection |
-| **1 — Cloud Infra** | **Cloud IOA Detections** · Event name, severity, MITRE tactic/technique, user, region, timestamp<br>**Cloud Risks** · Rule name, description, asset, account, region, risk factors, remediation<br>**Cloud Service IOMs** · Active misconfigurations with remediation steps, cloud console deep-links, and Falcon links |
-| **2 — Cloud Apps** | **Cloud Applications** · App name, deployment type, technologies, account, region, vulnerability count, ExPRT ratings<br>**Risky Container Images** · Per-image CVE layer breakdown — layer command, CVE ID, CVSS, package, exploit/fix flags, Falcon deep-link |
-| **3 — Shadow AI** | **AI Services** · IOMs scoped to AI cloud services (SageMaker, Bedrock, Vertex AI, etc.)<br>**AI Package Risks** · AI-related container packages with CVEs — CVE ID, description, fix version, affected images |
-| **4 — Unmanaged VMs** | **Unmanaged Virtual Machines** · Table of unmanaged, running VMs scoped to selected cloud providers |
+| **Cloud Infrastructure** | **Cloud IOA Detections** · Event name, severity, MITRE tactic/technique, user, region, timestamp<br>**Cloud Risks** · Rule name, description, asset, account, region, risk factors, remediation<br>**Cloud Service IOMs** · Active misconfigurations with remediation steps, cloud console deep-links, and Falcon links |
+| **Cloud Applications** | **Cloud Applications** · App name, deployment type, technologies, account, region, vulnerability count, ExPRT ratings<br>**Risky Container Images** · Per-image CVE layer breakdown — layer command, CVE ID, CVSS, package, exploit/fix flags, Falcon deep-link |
+| **Shadow AI** | **AI Services** · IOMs scoped to AI cloud services (SageMaker, Bedrock, Vertex AI, etc.)<br>**AI Package Risks** · AI-related container packages with CVEs — CVE ID, description, fix version, affected images |
+| **Unmanaged VMs** | **Unmanaged Virtual Machines** · Table of unmanaged, running VMs scoped to selected cloud providers |
 
 ---
 
