@@ -1816,13 +1816,7 @@ class FalconReport(FPDF):
         # Falcon deep-link
         falcon_url = img.get("falcon_url", "")
         if falcon_url:
-            self.ln(1)
-            link_id = self.add_link(falcon_url)
-            self.set_font("Helvetica", "B", 8)
-            self.set_text_color(*AMBER)
-            self.set_x(self.l_margin + 4)
-            self.cell(0, 6, "View in Falcon Console", link=link_id,
-                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.link_row("Falcon", falcon_url, alt=len(fields) % 2 == 0)
 
         # Layer breakdown
         layers = img.get("layers") or []
