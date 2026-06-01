@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections
+from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, ContainerVulnerabilities, CloudSecurityDetections
 from fpdf import FPDF, XPos, YPos
 
 VM_FILTERS = [
@@ -198,8 +198,10 @@ def _prompt(label, default=""):
 
 def _prompt_yn(label, default=True):
     hint = "Y/n" if default else "y/N"
-    raw = _prompt(f"{label} ({hint})", "")
-    return raw.lower().startswith("y") if raw else default
+    raw = _prompt(label, hint)
+    if not raw or raw == hint:
+        return default
+    return raw.lower().startswith("y")
 
 
 def interactive_config():
@@ -216,6 +218,7 @@ def interactive_config():
     config["include_ioas"]  = _prompt_yn("Include Cloud IOA Detections", default=True)
     config["include_vms"]   = _prompt_yn("Include Unmanaged Virtual Machines", default=True)
     config["include_ai_packages"] = _prompt_yn("Include AI Package Risks (Critical CVEs)", default=True)
+    config["include_risky_images"] = _prompt_yn("Include Risky Images (CVE layer breakdown)", default=True)
     print()
 
     if config["include_risks"]:
@@ -256,6 +259,22 @@ def interactive_config():
         else:
             sevs = [s.strip().capitalize() for s in ai_sev_raw.split(",") if s.strip()]
             config["ai_package_severities"] = [s for s in sevs if s in VALID_SEVERITIES] or ["Critical"]
+        print()
+
+    if config["include_risky_images"]:
+        print(f"  {T_BOLD}{T_HEADER}▸ Risky Images Filters{T_RESET}")
+        print(f"  {T_HINT}Available severities: {', '.join(VALID_SEVERITIES)}, all{T_RESET}")
+        ri_sev_raw = _prompt("CVE severity (comma-separated, or all)", "Critical")
+        if not ri_sev_raw.strip() or ri_sev_raw.strip().lower() == "all":
+            config["risky_images_severities"] = []
+        else:
+            sevs = [s.strip().capitalize() for s in ri_sev_raw.split(",") if s.strip()]
+            config["risky_images_severities"] = [s for s in sevs if s in VALID_SEVERITIES] or ["Critical"]
+        ri_max_raw = _prompt("Max images to include", "10")
+        try:
+            config["risky_images_max"] = max(1, int(ri_max_raw.strip()))
+        except (ValueError, TypeError):
+            config["risky_images_max"] = 10
         print()
 
     if config["include_vms"]:
@@ -310,9 +329,12 @@ def _default_config():
         "include_ioas":           True,
         "include_vms":            True,
         "include_ai_packages":    False,
+        "include_risky_images":   False,
         "iom_categories":         [],
         "iom_severities":         [],
         "ai_package_severities":  ["Critical"],
+        "risky_images_severities": ["Critical"],
+        "risky_images_max":       10,
         "severities":             ["High"],
         "status":                 "Open",
         "risk_provider":          "all",
@@ -338,7 +360,7 @@ def _default_config():
 def _sanitize_saved_config(cfg):
     """Normalize and drop invalid values from a loaded .report_defaults.json."""
     out = {}
-    bool_keys = ("include_risks", "include_ioas", "include_vms", "include_ai_packages")
+    bool_keys = ("include_risks", "include_ioas", "include_vms", "include_ai_packages", "include_risky_images")
     for k in bool_keys:
         if k in cfg:
             out[k] = bool(cfg[k])
@@ -363,6 +385,13 @@ def _sanitize_saved_config(cfg):
         out["ioa_severities"] = [s for s in cfg["ioa_severities"] if s in VALID_SEVERITIES]
     if "ai_package_severities" in cfg:
         out["ai_package_severities"] = [s for s in cfg["ai_package_severities"] if s in VALID_SEVERITIES] or ["Critical"]
+    if "risky_images_severities" in cfg:
+        out["risky_images_severities"] = [s for s in cfg["risky_images_severities"] if s in VALID_SEVERITIES] or ["Critical"]
+    if "risky_images_max" in cfg:
+        try:
+            out["risky_images_max"] = max(1, int(cfg["risky_images_max"]))
+        except (TypeError, ValueError):
+            pass
     valid_vm = {"AWS", "Azure", "GCP"}
     if "vm_providers" in cfg:
         out["vm_providers"] = [p for p in cfg["vm_providers"] if p in valid_vm] or ["AWS", "Azure", "GCP"]
@@ -571,27 +600,29 @@ def _image_label(img):
 
 
 def fetch_images_for_package(ci, package_name_version):
-    """Return a deduplicated list of image name strings containing this package."""
+    """Return a deduplicated list of image labels containing this package."""
     images = []
-    seen_digests = set()
-    after = None
+    seen_labels = set()
+    offset = 0
+    limit = 100
     while True:
-        params = {"filter": f"package_name_version:'{package_name_version}'", "limit": 100}
-        if after:
-            params["after"] = after
-        r = ci.ReadCombinedImagesExport(**params)
+        r = ci.ReadCombinedImagesExport(
+            filter=f"package_name_version:'{package_name_version}'",
+            limit=limit,
+            offset=offset,
+        )
         if r["status_code"] != 200:
             dbg_response("ReadCombinedImagesExport", r)
             break
         batch = r["body"].get("resources") or []
         for img in batch:
-            digest = img.get("image_digest") or img.get("image_id") or _image_label(img)
-            if digest not in seen_digests:
-                seen_digests.add(digest)
-                images.append(_image_label(img))
-        after = r["body"].get("meta", {}).get("pagination", {}).get("after")
-        if not batch or not after:
+            label = _image_label(img)
+            if label not in seen_labels:
+                seen_labels.add(label)
+                images.append(label)
+        if len(batch) < limit:
             break
+        offset += len(batch)
     return images
 
 
@@ -628,6 +659,157 @@ def fetch_ai_critical_packages(sdk, ci, severities):
             })
     return result
 
+
+def _falcon_image_url(img, severities=None):
+    """Build Falcon console deep-link for the image vulnerability/layer view."""
+    image_id = img.get("image_id", "")
+    digest   = img.get("image_digest", "")
+    registry = img.get("registry", "")
+    repo     = img.get("repository", "")
+    tag      = img.get("tag", "")
+    if not image_id or not digest:
+        return ""
+    api_base = os.environ.get("FALCON_BASE_URL", "https://api.crowdstrike.com").rstrip("/")
+    if api_base == "https://api.crowdstrike.com":
+        console = "https://falcon.crowdstrike.com"
+    else:
+        m = re.search(r"https://api\.([^/]+)\.crowdstrike\.com", api_base)
+        console = f"https://{m.group(1)}.falcon.crowdstrike.com" if m else "https://falcon.crowdstrike.com"
+    sevs = severities or ["Critical"]
+    sev_parts = "+".join(f"severity:'{s}'" for s in sevs)
+    return (
+        f"{console}/cloud-security/cwpp/image-details/known-issues/vulnerabilities-critical-and-high"
+        f"?digest={quote(digest, safe='')}"
+        f"&filter={quote(sev_parts, safe='')}"
+        f"&id={quote(image_id, safe='')}"
+        f"&informativeTab=details"
+        f"&registry={quote(registry, safe='')}"
+        f"&repository={quote(repo, safe='')}"
+        f"&tag={quote(tag, safe='')}"
+    )
+
+
+def fetch_risky_images(ci, cv, severities=None, max_images=10):
+    """Fetch images with the given severity CVEs and per-CVE layer details.
+
+    Returns a list of image dicts, each with a 'layers' list grouping CVEs
+    by (layer_index, layer_command).  Sorted by vulnerability_count desc.
+    """
+    target_sevs = severities if severities else []
+
+    # Build FQL filter — empty severities means no severity filter
+    if not target_sevs:
+        img_fql = None
+    elif len(target_sevs) == 1:
+        img_fql = f"vulnerability_severity:'{target_sevs[0]}'"
+    else:
+        joined = ",".join(f"'{s}'" for s in target_sevs)
+        img_fql = f"vulnerability_severity:[{joined}]"
+
+    # CVE severity filter for ReadCombinedVulnerabilitiesDetails
+    if not target_sevs:
+        cve_fql = None
+    elif len(target_sevs) == 1:
+        cve_fql = f"severity:'{target_sevs[0]}'"
+    else:
+        joined = ",".join(f"'{s}'" for s in target_sevs)
+        cve_fql = f"severity:[{joined}]"
+
+    # Step 1: paginate images
+    images = []
+    offset = 0
+    limit  = 100
+    while len(images) < max_images:
+        batch_limit = min(limit, max_images - len(images))
+        r = ci.GetCombinedImages(filter=img_fql, limit=batch_limit, offset=offset)
+        if r["status_code"] != 200:
+            raise RuntimeError(f"GetCombinedImages failed: {r['body'].get('errors')}")
+        batch = r["body"].get("resources") or []
+        images.extend(batch)
+        if len(batch) < batch_limit:
+            break
+        offset += len(batch)
+
+    if not images:
+        return []
+
+    def _fetch_details(img):
+        image_id = img["image_id"]
+
+        # Get UUID via CombinedImageDetail (ReadCombinedVulnerabilitiesDetails requires UUID)
+        r_det = ci.CombinedImageDetail(filter=f"image_id:'{image_id}'", limit=1)
+        if r_det["status_code"] != 200 or not (r_det["body"].get("resources") or []):
+            return None
+        uuid = r_det["body"]["resources"][0].get("uuid", "")
+        if not uuid:
+            return None
+
+        # Fetch all matching CVEs with offset pagination
+        cves, offset, limit = [], 0, 100
+        while True:
+            kwargs = {"id": uuid, "limit": limit, "offset": offset}
+            if cve_fql:
+                kwargs["filter"] = cve_fql
+            r_cv = cv.ReadCombinedVulnerabilitiesDetails(**kwargs)
+            if r_cv["status_code"] != 200:
+                break
+            page = r_cv["body"].get("resources") or []
+            cves.extend(page)
+            if len(page) < limit:
+                break
+            offset += len(page)
+
+        # Group CVEs by (layer_index, layer_command)
+        layers_dict = {}
+        for c in cves:
+            key = (c.get("layer_index", 0), (c.get("layer_command") or "").strip())
+            layers_dict.setdefault(key, []).append({
+                "cve_id":               c.get("cve_id", ""),
+                "severity":             c.get("severity", ""),
+                "cvss_score":           str(c.get("cvss_score") or ""),
+                "cps_rating":           c.get("cps_current_rating", ""),
+                "package_name_version": c.get("package_name_version", ""),
+                "exploited":            int(c.get("exploited_status") or 0) > 0,
+                "fix_available":        bool(c.get("remediation_available")),
+            })
+
+        layers = [
+            {"layer_index": k[0], "layer_command": k[1],
+             "cves": sorted(v, key=lambda x: float(x["cvss_score"] or 0), reverse=True)}
+            for k, v in sorted(layers_dict.items())
+        ]
+
+        return {
+            "image_id":                    image_id,
+            "image_digest":                img.get("image_digest", ""),
+            "registry":                    img.get("registry", ""),
+            "repository":                  img.get("repository", ""),
+            "tag":                         img.get("tag", ""),
+            "base_os":                     img.get("base_os", ""),
+            "vulnerability_count":         img.get("vulnerabilities", 0),
+            "layers_with_vulnerabilities": img.get("layers_with_vulnerabilities", 0),
+            "packages":                    img.get("packages", 0),
+            "containers":                  img.get("containers", 0),
+            "falcon_url":                  _falcon_image_url(img, target_sevs),
+            "layers":                      layers,
+            "cve_count":                   len(cves),
+        }
+
+    results = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(_fetch_details, img): img for img in images}
+        done = 0
+        for future in as_completed(futures):
+            done += 1
+            print(f"  {T_HINT}  Fetching image details  {T_MUTED}({done}/{len(images)}){T_RESET}",
+                  end="\r", flush=True)
+            result = future.result()
+            if result:
+                results.append(result)
+    print(flush=True)
+
+    results.sort(key=lambda x: x.get("vulnerability_count", 0), reverse=True)
+    return results
 
 def fetch_ioms(csd, categories, severities=None):
     """Fetch non-compliant IOM entities for the given category list.
@@ -844,6 +1026,35 @@ def print_ai_packages(packages):
             if desc:
                 short = desc[:160].replace("\n", " ")
                 print(f"    {t_label('Desc:     ')} {T_MUTED}{short}{'...' if len(desc) > 160 else ''}{T_RESET}")
+        print(f"\n  {T_MUTED}{'─' * 62}{T_RESET}")
+    print()
+
+
+def print_risky_images(images):
+    _banner("RISKY IMAGES — CVE LAYER BREAKDOWN", len(images))
+
+    if not images:
+        print(f"\n  {T_WARN}No images with matching CVEs found.{T_RESET}\n")
+        return
+
+    for i, img in enumerate(images, 1):
+        label = f"{img.get('registry', '')}/{img.get('repository', '')}:{img.get('tag', '')}"
+        print(f"\n  {T_BOLD}{T_VALUE}[{i} of {len(images)}]  {label}{T_RESET}")
+        print(f"  {t_label('OS:        ')} {T_VALUE}{img.get('base_os') or 'N/A'}{T_RESET}")
+        print(f"  {t_label('CVE Count: ')} {T_BOLD}{T_CRITICAL}{img.get('cve_count', 0)}{T_RESET}")
+        layers = img.get("layers") or []
+        for layer in layers:
+            cmd = layer["layer_command"] or "(no command)"
+            print(f"\n    {T_BOLD}{T_HEADER}Layer {layer['layer_index']}:{T_RESET}  {T_MUTED}{cmd[:80]}{T_RESET}")
+            for cve in layer["cves"]:
+                exploit = f"  {T_CRITICAL}[EXPLOIT]{T_RESET}" if cve["exploited"] else ""
+                fix = f"  {T_SUCCESS}[FIX AVAILABLE]{T_RESET}" if cve["fix_available"] else ""
+                print(f"      {T_BOLD}{T_CRITICAL}{cve['cve_id']}{T_RESET}  "
+                      f"{T_MUTED}CVSS {cve['cvss_score'] or 'N/A'}{T_RESET}  "
+                      f"{T_VALUE}{cve.get('package_name_version', '')}{T_RESET}"
+                      f"{exploit}{fix}")
+        if img.get("falcon_url"):
+            print(f"\n    {t_label('Falcon:    ')} {T_HINT}{img['falcon_url'][:100]}{T_RESET}")
         print(f"\n  {T_MUTED}{'─' * 62}{T_RESET}")
     print()
 
@@ -1199,7 +1410,8 @@ class FalconReport(FPDF):
         self.cell(0, 8, f"Generated {now_utc()}  |  Page {self.page_no()}", align="C")
 
     def cover(self, risks_count=None, ioas_count=None, vm_totals=None,
-              ai_packages_count=None, ioms_count=None, ioms_label="", filter_desc=""):
+              ai_packages_count=None, ioms_count=None, ioms_label="",
+              risky_images_count=None, filter_desc=""):
         self.set_fill_color(*DARK)
         self.rect(0, 0, 210, 297, "F")
         self.set_y(80)
@@ -1258,6 +1470,13 @@ class FalconReport(FPDF):
             self.set_text_color(*LIGHT_GRAY)
             label = f"Cloud Service IOMs ({ioms_label}):  {ioms_count}" if ioms_label else f"Cloud Service IOMs:  {ioms_count}"
             self.cell(0, 8, label, align="C",
+                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.ln(2)
+
+        if risky_images_count is not None:
+            self.set_font("Helvetica", "B", 10)
+            self.set_text_color(*LIGHT_GRAY)
+            self.cell(0, 8, f"Risky Images:  {risky_images_count}", align="C",
                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             self.ln(2)
 
@@ -1573,6 +1792,118 @@ class FalconReport(FPDF):
         self._separator()
 
 
+    def risky_image_card(self, i, total, img):
+        registry = img.get("registry", "")
+        repo     = img.get("repository", "")
+        tag      = img.get("tag", "")
+        label    = f"{registry}/{repo}:{tag}" if registry else f"{repo}:{tag}"
+
+        if self.get_y() > self.h - self.b_margin - 60:
+            self.add_page()
+
+        # Card header
+        self.set_fill_color(*DARK)
+        self.rect(self.l_margin, self.get_y(), self.epw, 10, "F")
+        self.set_font("Helvetica", "B", 9)
+        self.set_text_color(*WHITE)
+        self.set_x(self.l_margin)
+        self.cell(self.epw, 10, sanitize(f"  [{i} of {total}]  {label}"),
+                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        self.ln(1)
+
+        # Stats row
+        fields = [
+            ("Base OS",             img.get("base_os") or "N/A"),
+            ("CVEs",                img.get("cve_count", 0)),
+            ("Layers w/ CVEs",      img.get("layers_with_vulnerabilities", 0)),
+        ]
+        for idx, (field, value) in enumerate(fields):
+            self.row(field, value, alt=idx % 2 == 0)
+
+        # Falcon deep-link
+        falcon_url = img.get("falcon_url", "")
+        if falcon_url:
+            self.link_row("Falcon", falcon_url, alt=len(fields) % 2 == 0)
+
+        # Layer breakdown
+        layers = img.get("layers") or []
+        if layers:
+            self.ln(3)
+            self.sub_header("CVE Layer Breakdown")
+
+        for layer in layers:
+            if self.get_y() > self.h - self.b_margin - 25:
+                self.add_page()
+
+            cmd = (layer.get("layer_command") or "").strip() or "(no command)"
+            layer_label = f"Layer {layer['layer_index']}  —  {cmd}"
+
+            self.set_fill_color(*SECTION_BG)
+            self.set_font("Helvetica", "B", 8)
+            self.set_text_color(*DARK)
+            self.set_x(self.l_margin)
+            self.multi_cell(self.epw, 6, sanitize(layer_label[:120]),
+                            fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.ln(1)
+
+            # Column headers
+            W = self.epw
+            col_cve  = 40
+            col_cvss = 18
+            col_pkg  = W - col_cve - col_cvss - 28
+            col_flag = 28
+            self.set_font("Helvetica", "B", 7)
+            self.set_text_color(*MID_GRAY)
+            self.set_x(self.l_margin + 2)
+            self.cell(col_cve,  5, "CVE ID")
+            self.cell(col_cvss, 5, "CVSS", align="C")
+            self.cell(col_pkg,  5, "Package")
+            self.cell(col_flag, 5, "Flags", align="R",
+                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.set_draw_color(*LIGHT_GRAY)
+            self.set_line_width(0.2)
+            self.line(self.l_margin, self.get_y(), self.l_margin + W, self.get_y())
+            self.ln(1)
+
+            for cidx, cve in enumerate(layer["cves"]):
+                if self.get_y() > self.h - self.b_margin - 12:
+                    self.add_page()
+
+                if cidx % 2 == 1:
+                    self.set_fill_color(*SECTION_BG)
+                    self.rect(self.l_margin, self.get_y(), W, 6, "F")
+
+                sev = (cve.get("severity") or "").lower()
+                sev_color = {
+                    "critical": CS_RED, "high": AMBER, "medium": (200, 180, 0)
+                }.get(sev, MID_GRAY)
+
+                self.set_font("Helvetica", "B", 7.5)
+                self.set_text_color(*sev_color)
+                self.set_x(self.l_margin + 2)
+                self.cell(col_cve, 6, sanitize(cve.get("cve_id", "N/A")))
+
+                self.set_font("Helvetica", "", 7.5)
+                self.set_text_color(*DARK)
+                self.cell(col_cvss, 6, sanitize(cve.get("cvss_score", "N/A")), align="C")
+
+                pkg = (cve.get("package_name_version") or "").strip()
+                self.cell(col_pkg, 6, sanitize(pkg[:40]))
+
+                flags = []
+                if cve.get("exploited"):      flags.append("EXPLOIT")
+                if cve.get("fix_available"):  flags.append("FIX")
+                flag_str = "  ".join(flags)
+                self.set_font("Helvetica", "B", 7)
+                self.set_text_color(*CS_RED if flags else MID_GRAY)
+                self.cell(col_flag, 6, sanitize(flag_str), align="R",
+                          new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+            self.ln(4)
+
+        self._separator()
+
+
     def ai_iom_card(self, i, total, iom):
         if self.get_y() > self.h - self.b_margin - 80:
             self.add_page()
@@ -1634,7 +1965,7 @@ class FalconReport(FPDF):
         self._separator()
 
 
-def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
+def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, config):
     output_file = ensure_timestamped_filename(config.get("output_file", OUTPUT_FILE))
     vm_totals = {provider: len(assets) for provider, assets in vm_data.items()}
     iom_cats = config.get("iom_categories", [])
@@ -1650,12 +1981,13 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
 
     pdf.add_page()
     pdf.cover(
-        risks_count=len(risks)             if config.get("include_risks")       else None,
-        ioas_count=len(ioas)               if config.get("include_ioas")        else None,
-        vm_totals=vm_totals                if config.get("include_vms")         else None,
-        ai_packages_count=len(ai_packages) if config.get("include_ai_packages") else None,
-        ioms_count=len(ioms)               if iom_cats                          else None,
-        ioms_label=ioms_label              if iom_cats                          else "",
+        risks_count=len(risks)             if config.get("include_risks")         else None,
+        ioas_count=len(ioas)               if config.get("include_ioas")          else None,
+        vm_totals=vm_totals                if config.get("include_vms")           else None,
+        ai_packages_count=len(ai_packages) if config.get("include_ai_packages")   else None,
+        ioms_count=len(ioms)               if iom_cats                            else None,
+        ioms_label=ioms_label              if iom_cats                            else "",
+        risky_images_count=len(risky_images) if config.get("include_risky_images") else None,
         filter_desc=fdesc,
     )
 
@@ -1723,6 +2055,18 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
             for i, iom in enumerate(ioms, 1):
                 pdf.ai_iom_card(i, len(ioms), iom)
 
+    if config.get("include_risky_images"):
+        _begin_section(f"Risky Images  ({len(risky_images)} total)")
+        pdf.section_header(f"Risky Images  ({len(risky_images)} total)")
+        if not risky_images:
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(*MID_GRAY)
+            pdf.cell(0, 8, "  No images with matching CVEs found.",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        else:
+            for i, img in enumerate(risky_images, 1):
+                pdf.risky_image_card(i, len(risky_images), img)
+
     if config.get("include_vms"):
         total_vms = sum(vm_totals.values())
         _begin_section(f"Unmanaged Virtual Machines  ({total_vms} total)")
@@ -1772,6 +2116,7 @@ if __name__ == "__main__":
     alerts          = Alerts(auth_object=auth)
     cp              = ContainerPackages(auth_object=auth)
     ci              = ContainerImages(auth_object=auth)
+    cv              = ContainerVulnerabilities(auth_object=auth)
     csd             = CloudSecurityDetections(auth_object=auth)
 
     risks = []
@@ -1803,6 +2148,15 @@ if __name__ == "__main__":
         ai_packages = fetch_ai_critical_packages(cp, ci, ai_sevs)
         print(f"{T_SUCCESS}  ✓ {len(ai_packages)} AI package(s) found.{T_RESET}")
 
+    risky_images = []
+    if config.get("include_risky_images"):
+        ri_sevs = config.get("risky_images_severities", ["Critical"])
+        ri_max  = config.get("risky_images_max", 10)
+        sev_label = ", ".join(ri_sevs) if ri_sevs else "all severities"
+        print(f"{T_HINT}  Fetching risky images  {T_MUTED}({sev_label}, up to {ri_max}){T_RESET}")
+        risky_images = fetch_risky_images(ci, cv, ri_sevs, ri_max)
+        print(f"{T_SUCCESS}  ✓ {len(risky_images)} risky image(s) found.{T_RESET}")
+
     ioms = []
     iom_cats = config.get("iom_categories", [])
     if iom_cats:
@@ -1822,8 +2176,10 @@ if __name__ == "__main__":
         print_vms(vm_data)
     if config["include_ai_packages"]:
         print_ai_packages(ai_packages)
+    if config.get("include_risky_images"):
+        print_risky_images(risky_images)
     if iom_cats:
         print_ai_ioms(ioms)
 
     print(f"\n{T_HINT}  Building PDF...{T_RESET}")
-    build_pdf(risks, ioas, vm_data, ai_packages, ioms, config)
+    build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, config)
