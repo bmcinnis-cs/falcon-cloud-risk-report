@@ -6,11 +6,12 @@
 
 ## What It Produces
 
-A single PDF with a cover page and up to five content sections — each togglable at runtime:
+A single PDF with a cover page, a clickable table of contents, and up to five content sections — each togglable at runtime:
 
-| Section | Content |
+| Page | Content |
 |---|---|
-| **Cover page** | Active filter summary and counts for each included section |
+| **Cover** | Section counts, active filter summary, and generation timestamp |
+| **Table of Contents** | Clickable page-linked index of every included section |
 | **Cloud Risks** | Rule name, description, asset, account, region, and risk factors with remediation steps |
 | **Cloud IOA Detections** | Event name, description, severity, MITRE tactic/technique, user, region, and timestamp |
 | **AI Package Risks** | AI-related container packages with CVEs — CVE ID, description, fix version, and affected image names |
@@ -97,48 +98,50 @@ python cloud_risks_report_pdf.py -i -d
 
 ## Interactive Mode
 
-Pass `-i` or `--interactive` to configure the report before any API calls are made. You will be stepped through each section — press **Enter** to accept the default shown in brackets.
+Pass `-i` or `--interactive` to configure the report before any API calls are made. You will be stepped through each section — press **Enter** to accept the default shown in `[ ]`.
 
 ```
-Falcon Cloud Security Report -- Configuration
-Press Enter to accept defaults.
+  ──────────────────────────────────────────────────────────
+  Falcon Cloud Security  ·  Report Configuration
+  Press Enter to accept the default shown in [ ]
+  ──────────────────────────────────────────────────────────
 
-  Sections
-  Include Cloud Risks (Y/n):
-  Include Cloud IOA Detections (Y/n):
-  Include Unmanaged VMs (Y/n):
-  Include AI Package Risks (Critical CVEs) (Y/n):
+  ▸ Sections
+  Include Cloud Risks (Y/n)
+  Include Cloud IOA Detections (Y/n)
+  Include Unmanaged Virtual Machines (Y/n)
+  Include AI Package Risks (Critical CVEs) (Y/n)
 
-  Risk Filters
+  ▸ Risk Filters
   Available severities: Critical, High, Medium, Low, Informational
-  Severity (comma-separated) [High]:
+  Severity (comma-separated)  [High]
   Available statuses: Open, Closed, all
-  Status [Open]:
+  Status  [Open]
   Available providers: aws, azure, gcp, all
-  Cloud provider [all]:
+  Cloud provider  [all]
 
-  Cloud IOA Filters
+  ▸ Cloud IOA Filters
   Available severities: Critical, High, Medium, Low, Informational, all
-  IOA severity (comma-separated, or all) [all]:
+  IOA severity (comma-separated, or all)  [all]
 
-  AI Package Filters
+  ▸ AI Package Filters
   Available severities: Critical, High, Medium, Low, Informational, all
-  Package severity (comma-separated, or all) [Critical]:
+  Package severity (comma-separated, or all)  [Critical]
 
-  VM Filters
+  ▸ VM Filters
   Available providers: AWS, Azure, GCP
-  VM providers (comma-separated) [AWS,Azure,GCP]:
+  VM providers (comma-separated)  [AWS,Azure,GCP]
 
-  IOM Filters
+  ▸ IOM / Misconfiguration Filters
   Available categories: account, ai, compute, containers, database, iam, networking, secrets, serverless, storage, all
   Enter 'none' or leave blank to skip the IOM section.
-  IOM categories (comma-separated, all, or none) [none]:
+  IOM categories (comma-separated, all, or none)  [none]
   Available severities: Critical, High, Medium, Low, Informational, all
-  IOM severity (comma-separated, or all) [all]:
+  IOM severity (comma-separated, or all)  [all]
 
-  Output
-  Output filename [falcon_cloud_security_report.pdf]:
-  Save as new defaults (y/N):
+  ▸ Output
+  Output filename  [falcon_cloud_security_report.pdf]
+  Save as new defaults (y/N)
 ```
 
 > The IOM severity prompt only appears when at least one category is selected.
@@ -149,7 +152,7 @@ Press Enter to accept defaults.
 |---|---|---|
 | Include Cloud Risks | `y` / `n` | `y` |
 | Include Cloud IOA Detections | `y` / `n` | `y` |
-| Include Unmanaged VMs | `y` / `n` | `y` |
+| Include Unmanaged Virtual Machines | `y` / `n` | `y` |
 | Include AI Package Risks | `y` / `n` | `y` (interactive) / `n` (non-interactive) |
 | Risk severity | `Critical`, `High`, `Medium`, `Low`, `Informational` (comma-separated) | `High` |
 | Risk status | `Open`, `Closed`, `all` | `Open` |
