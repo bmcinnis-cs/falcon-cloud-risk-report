@@ -266,7 +266,7 @@ def interactive_config():
         print(f"  {T_HINT}Available severities: {', '.join(VALID_SEVERITIES)}, all{T_RESET}")
         ri_sev_raw = _prompt("CVE severity (comma-separated, or all)", "Critical")
         if not ri_sev_raw.strip() or ri_sev_raw.strip().lower() == "all":
-            config["risky_images_severities"] = ["Critical"]
+            config["risky_images_severities"] = []
         else:
             sevs = [s.strip().capitalize() for s in ri_sev_raw.split(",") if s.strip()]
             config["risky_images_severities"] = [s for s in sevs if s in VALID_SEVERITIES] or ["Critical"]
@@ -695,14 +695,25 @@ def fetch_risky_images(ci, cv, severities=None, max_images=10):
     Returns a list of image dicts, each with a 'layers' list grouping CVEs
     by (layer_index, layer_command).  Sorted by vulnerability_count desc.
     """
-    target_sevs = severities or ["Critical"]
+    target_sevs = severities if severities else []
 
-    # Build FQL filter — GetCombinedImages supports vulnerability_severity
-    if len(target_sevs) == 1:
+    # Build FQL filter — empty severities means no severity filter
+    if not target_sevs:
+        img_fql = None
+    elif len(target_sevs) == 1:
         img_fql = f"vulnerability_severity:'{target_sevs[0]}'"
     else:
         joined = ",".join(f"'{s}'" for s in target_sevs)
         img_fql = f"vulnerability_severity:[{joined}]"
+
+    # CVE severity filter for ReadCombinedVulnerabilitiesDetails
+    if not target_sevs:
+        cve_fql = None
+    elif len(target_sevs) == 1:
+        cve_fql = f"severity:'{target_sevs[0]}'"
+    else:
+        joined = ",".join(f"'{s}'" for s in target_sevs)
+        cve_fql = f"severity:[{joined}]"
 
     # Step 1: paginate images
     images = []
@@ -722,13 +733,6 @@ def fetch_risky_images(ci, cv, severities=None, max_images=10):
     if not images:
         return []
 
-    # CVE severity filter for ReadCombinedVulnerabilitiesDetails
-    if len(target_sevs) == 1:
-        cve_fql = f"severity:'{target_sevs[0]}'"
-    else:
-        joined = ",".join(f"'{s}'" for s in target_sevs)
-        cve_fql = f"severity:[{joined}]"
-
     def _fetch_details(img):
         image_id = img["image_id"]
 
@@ -743,9 +747,10 @@ def fetch_risky_images(ci, cv, severities=None, max_images=10):
         # Fetch all matching CVEs with offset pagination
         cves, offset, limit = [], 0, 100
         while True:
-            r_cv = cv.ReadCombinedVulnerabilitiesDetails(
-                id=uuid, filter=cve_fql, limit=limit, offset=offset,
-            )
+            kwargs = {"id": uuid, "limit": limit, "offset": offset}
+            if cve_fql:
+                kwargs["filter"] = cve_fql
+            r_cv = cv.ReadCombinedVulnerabilitiesDetails(**kwargs)
             if r_cv["status_code"] != 200:
                 break
             page = r_cv["body"].get("resources") or []
