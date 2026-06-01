@@ -9,15 +9,48 @@ from urllib.parse import quote
 import re as _re
 from datetime import datetime, timezone
 from dotenv import load_dotenv
+from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections, Hosts
 from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections
 from fpdf import FPDF, XPos, YPos
 
 RISKS_FILTER = "status:'Open'+severity:'High'"
+# Updated VM approach: Use CloudSecurityAssets with exact Asset Explorer filters
 VM_FILTERS = [
-    ("AWS",   "managed_by:'Unmanaged'+cloud_provider:'aws'+instance_state:'running'"),
-    ("Azure", "managed_by:'Unmanaged'+cloud_provider:'azure'+instance_state:'running'"),
-    ("GCP",   "managed_by:'Unmanaged'+cloud_provider:'gcp'+instance_state:'running'"),
+    ("AWS",   "active:'true'+cloud_provider:'aws'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
+    ("Azure", "active:'true'+cloud_provider:'azure'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
+    ("GCP",   "active:'true'+cloud_provider:'gcp'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
 ]
+
+def get_default_output_filename():
+    """Generate a default output filename with timestamp"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"falcon_cloud_security_report_{timestamp}.pdf"
+
+def ensure_timestamped_filename(filename):
+    """Ensure filename has timestamp for uniqueness"""
+    if not filename:
+        return get_default_output_filename()
+
+    # Check if filename already has timestamp pattern (YYYYMMDD_HHMMSS)
+    import re
+    timestamp_pattern = r'_\d{8}_\d{6}'
+
+    if re.search(timestamp_pattern, filename):
+        return filename  # Already has timestamp
+
+    # Add timestamp before .pdf extension (case-insensitive)
+    if filename.lower().endswith('.pdf'):
+        base_name = filename[:-4]  # Remove .pdf/.PDF
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Preserve original extension case
+        extension = filename[-4:]  # Get original .pdf or .PDF
+        return f"{base_name}_{timestamp}{extension}"
+    else:
+        # Add .pdf and timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"{filename}_{timestamp}.pdf"
+
+OUTPUT_FILE    = get_default_output_filename()
 OUTPUT_FILE    = "falcon_cloud_security_report.pdf"
 DEFAULTS_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".report_defaults.json")
 
@@ -167,6 +200,7 @@ def interactive_config():
     print(f"  {T_BOLD}Sections{T_RESET}")
     config["include_risks"] = _prompt_yn("Include Cloud Risks", default=True)
     config["include_ioas"]  = _prompt_yn("Include Cloud IOA Detections", default=True)
+    config["include_vms"]   = _prompt_yn("Include Unmanaged Virtual Machines", default=True)
     config["include_vms"]   = _prompt_yn("Include Unmanaged VMs", default=True)
     config["include_ai_packages"] = _prompt_yn("Include AI Package Risks (Critical CVEs)", default=True)
     print()
@@ -245,7 +279,8 @@ def interactive_config():
     print()
 
     print(f"  {T_BOLD}Output{T_RESET}")
-    config["output_file"] = _prompt("Output filename", OUTPUT_FILE)
+    user_filename = _prompt("Output filename", OUTPUT_FILE)
+    config["output_file"] = ensure_timestamped_filename(user_filename)
     print()
 
     merged = {**_default_config(), **config}
@@ -347,6 +382,7 @@ def build_filters(config):
     if provider != "all":
         risks_filter += f"+cloud_provider:'{provider}'"
 
+    # Use exact Asset Explorer VM filters
     vm_providers = config.get("vm_providers", ["AWS", "Azure", "GCP"])
     vm_filters = [(p, f) for p, f in VM_FILTERS if p in vm_providers]
 
@@ -380,7 +416,11 @@ def _filter_desc(config):
 
 
 def now_utc():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+def now_utc_detailed():
+    """Returns a more detailed timestamp for report generation"""
+    return datetime.now(timezone.utc).strftime("%B %d, %Y at %H:%M:%S UTC")
 
 
 def sanitize(text):
@@ -487,6 +527,7 @@ def fetch_cloud_ioas(sdk, ioa_severities=None):
 
 
 def fetch_unmanaged_vms(sdk, filter_str):
+    """Legacy function - kept for compatibility but no longer used"""
     ids = []
     after = None
     while True:
@@ -509,6 +550,182 @@ def fetch_unmanaged_vms(sdk, filter_str):
             raise RuntimeError(f"get_assets failed: {r['body'].get('errors')}")
         assets.extend(r["body"].get("resources") or [])
     return assets
+
+
+def fetch_vms_without_sensor(hosts_sdk, cloud_provider):
+    """
+    Fetch VMs without CrowdStrike Falcon sensor for a specific cloud provider.
+    Uses the Hosts API with proper service_provider field identification.
+
+    Args:
+        hosts_sdk: Hosts API SDK instance
+        cloud_provider: 'aws', 'azure', or 'gcp'
+
+    Returns:
+        List of host records representing VMs without sensor
+    """
+    hosts = []
+    offset = 0
+    batch_size = 1000
+
+    # Map cloud provider names to service_provider field values
+    service_provider_mapping = {
+        'aws': 'AWS',
+        'azure': 'AZURE',
+        'gcp': 'GCP'
+    }
+
+    target_provider = service_provider_mapping.get(cloud_provider.lower())
+    if not target_provider:
+        print(f"    Warning: Unknown cloud provider '{cloud_provider}'")
+        return []
+
+    print(f"    Querying hosts with service_provider:'{target_provider}'...")
+
+    while True:
+        try:
+            # Use proper API filter for service provider
+            r = hosts_sdk.query_devices_by_filter(
+                limit=batch_size,
+                offset=offset,
+                filter=f"service_provider:'{target_provider}'"
+            )
+
+            if r["status_code"] != 200:
+                dbg_response("query_devices_by_filter", r)
+                break
+
+            batch_ids = r["body"].get("resources") or []
+            if not batch_ids:
+                break
+
+            print(f"    Processing {len(batch_ids)} {target_provider} hosts...")
+
+            # Get detailed host information
+            host_details_r = hosts_sdk.get_device_details(ids=batch_ids)
+            if host_details_r["status_code"] != 200:
+                dbg_response("get_device_details", host_details_r)
+                offset += len(batch_ids)
+                continue
+
+            host_details = host_details_r["body"].get("resources") or []
+
+            # Process each host
+            for host in host_details:
+                # Verify service_provider matches (double-check API filter worked)
+                host_provider = host.get("service_provider", "").upper()
+                if host_provider != target_provider:
+                    continue
+
+                # Filter for actual VMs (exclude mobile devices, containers, etc.)
+                platform = host.get("platform_name", "")
+                hostname = host.get("hostname", "")
+
+                # Only include VM-like platforms, exclude mobile and container platforms
+                if platform in ['Android', 'iOS', 'ChromeOS'] or '/subscriptions/' in hostname:
+                    continue
+
+                # Check sensor status based on agent_version presence and validity
+                agent_version = host.get("agent_version", "")
+                has_sensor = bool(agent_version and agent_version != "No Sensor")
+
+                hosts.append({
+                    'device_id': host.get('device_id'),
+                    'hostname': host.get('hostname'),
+                    'platform_name': host.get('platform_name'),
+                    'external_ip': host.get('external_ip'),
+                    'internal_ip': host.get('local_ip'),
+                    'last_seen': host.get('last_seen'),
+                    'sensor_version': agent_version if has_sensor else 'No Sensor',
+                    'cloud_provider': cloud_provider,
+                    'instance_state': 'running' if host.get('last_seen') else 'unknown',
+                    'service_provider': host.get('service_provider', ''),
+                    'has_sensor': has_sensor
+                })
+
+            # Update offset for pagination
+            offset += len(batch_ids)
+
+            # Check if we've processed all hosts
+            meta = r["body"].get("meta", {})
+            total = meta.get("total", 0)
+            if offset >= total or len(batch_ids) == 0:
+                break
+
+        except Exception as e:
+            print(f"    Warning: Error processing hosts batch at offset {offset}: {e}")
+            offset += batch_size  # Skip this batch and continue
+
+    print(f"    Found {len(hosts)} {target_provider} VMs")
+    return hosts
+
+
+def fetch_cloud_vms_comprehensive(hosts_sdk, csa_sdk, cloud_provider):
+    """
+    Comprehensive approach: Use Hosts API with proper service_provider field
+    to accurately identify cloud VMs and their sensor status.
+
+    This addresses the discrepancy between Asset Explorer (109 Azure VMs without sensor)
+    and the original CloudSecurityAssets approach (0 VMs found).
+    """
+    cloud_vms = []
+
+    # Method 1: Use Hosts API with proper service_provider filtering
+    try:
+        all_vms = fetch_vms_without_sensor(hosts_sdk, cloud_provider)
+
+        # The function returns ALL VMs for the provider, now filter for sensor status
+        # For the report, we want VMs WITHOUT sensor (matching Asset Explorer logic)
+        vms_without_sensor = [vm for vm in all_vms if not vm.get('has_sensor', True)]
+
+        print(f"    Total {cloud_provider.upper()} VMs: {len(all_vms)}")
+        print(f"    VMs with sensor: {len(all_vms) - len(vms_without_sensor)}")
+        print(f"    VMs without sensor: {len(vms_without_sensor)}")
+
+        cloud_vms.extend(vms_without_sensor)
+
+    except Exception as e:
+        print(f"    Warning: Hosts API query failed: {e}")
+
+    # Method 2 (Fallback): Use CloudSecurityAssets API for governance view if Hosts API fails
+    if not cloud_vms:
+        provider_filters = {
+            'aws': "managed_by:'Unmanaged'+cloud_provider:'aws'+instance_state:'running'",
+            'azure': "managed_by:'Unmanaged'+cloud_provider:'azure'+instance_state:'running'",
+            'gcp': "managed_by:'Unmanaged'+cloud_provider:'gcp'+instance_state:'running'"
+        }
+
+        if cloud_provider in provider_filters:
+            try:
+                print(f"    Falling back to CloudSecurityAssets API...")
+                governance_vms = fetch_unmanaged_vms(csa_sdk, provider_filters[cloud_provider])
+                # Convert to standard format
+                for vm in governance_vms:
+                    cloud_vms.append({
+                        'device_id': vm.get('id'),
+                        'hostname': vm.get('asset_name') or vm.get('resource_name'),
+                        'platform_name': vm.get('platform_name', cloud_provider),
+                        'external_ip': vm.get('public_ip'),
+                        'internal_ip': vm.get('private_ip'),
+                        'last_seen': vm.get('last_seen'),
+                        'sensor_version': 'Unmanaged Resource',
+                        'cloud_provider': cloud_provider,
+                        'instance_state': vm.get('instance_state', 'unknown'),
+                        'has_sensor': False
+                    })
+            except Exception as e:
+                print(f"    Warning: CloudSecurityAssets API query also failed: {e}")
+
+    # Deduplicate by hostname/device_id
+    seen = set()
+    unique_vms = []
+    for vm in cloud_vms:
+        key = vm.get('hostname') or vm.get('device_id')
+        if key and key not in seen:
+            seen.add(key)
+            unique_vms.append(vm)
+
+    return unique_vms
 
 
 def _image_label(img):
@@ -1038,7 +1255,13 @@ class FalconReport(FPDF):
         self.set_text_color(*CS_RED)
         self.cell(0, 10, "Security Report", align="C",
                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-        self.ln(12)
+
+        # Add date subtitle
+        self.set_font("Helvetica", "", 10)
+        self.set_text_color(*LIGHT_GRAY)
+        self.cell(0, 8, datetime.now(timezone.utc).strftime("%B %d, %Y"), align="C",
+                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        self.ln(8)
 
         if risks_count is not None:
             self.set_font("Helvetica", "B", 10)
@@ -1058,7 +1281,7 @@ class FalconReport(FPDF):
             for provider, count in vm_totals.items():
                 self.set_font("Helvetica", "", 9)
                 self.set_text_color(*MID_GRAY)
-                self.cell(0, 7, f"Unmanaged Running VMs ({provider}):  {count}", align="C",
+                self.cell(0, 7, f"Unmanaged Virtual Machines ({provider}):  {count}", align="C",
                           new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
         if ai_packages_count is not None:
@@ -1086,7 +1309,7 @@ class FalconReport(FPDF):
         self.ln(10)
         self.set_font("Helvetica", "", 9)
         self.set_text_color(*MID_GRAY)
-        self.cell(0, 7, f"Generated: {now_utc()}", align="C",
+        self.cell(0, 7, f"Generated: {now_utc_detailed()}", align="C",
                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     def section_header(self, title):
@@ -1274,7 +1497,7 @@ class FalconReport(FPDF):
         if not assets:
             self.set_font("Helvetica", "", 8)
             self.set_text_color(*MID_GRAY)
-            self.cell(0, 8, "  No assets found.", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.cell(0, 8, "  No unmanaged virtual machines found.", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             self.ln(2)
             return
 
@@ -1295,14 +1518,20 @@ class FalconReport(FPDF):
             if self.get_y() + 6.5 > self.h - self.b_margin:
                 self.add_page()
                 _table_header()
-            rid = asset.get("resource_id", "N/A")
+
+            # Use original CloudSecurityAssets data structure
+            rid = asset.get("resource_id") or asset.get("id", "N/A")
+            account_id = asset.get("account_id", "N/A")
+
+            # Truncate long resource IDs for display
             rid_display = rid if len(rid) <= 45 else rid[:42] + "..."
+
             self.set_fill_color(*(SECTION_BG if idx % 2 == 0 else WHITE))
             self.set_font("Helvetica", "", 7.5)
             self.set_text_color(*DARK)
             self.set_x(self.l_margin)
             self.cell(col_w, 6.5, f"  {rid_display}", fill=True)
-            self.cell(col_w, 6.5, f"  {asset.get('account_id', 'N/A')}", fill=True,
+            self.cell(col_w, 6.5, f"  {account_id}", fill=True,
                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
         self.ln(4)
@@ -1353,6 +1582,106 @@ class FalconReport(FPDF):
 
             fix = vuln.get("fix_resolution") or []
             fix_str = ", ".join(fix) if fix else "No fix available"
+
+            self.set_fill_color(*LIGHT_GRAY)
+            self.set_font("Helvetica", "B", 8)
+            self.set_text_color(*DARK)
+            self.set_x(self.l_margin)
+            self.cell(self.epw, 7, sanitize(f"  {vuln.get('cveid', 'N/A')}"),
+                      fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+            self.set_font("Helvetica", "B", 8)
+            self.set_text_color(*AMBER)
+            self.set_x(self.l_margin + 4)
+            self.cell(self.epw - 4, 6, sanitize(f"Fix: {fix_str}"),
+                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+            desc = (vuln.get("description") or "").strip()
+            if desc:
+                if self.get_y() > self.h - self.b_margin - 20:
+                    self.add_page()
+                self.set_font("Helvetica", "", 7.5)
+                self.set_text_color(*MID_GRAY)
+                self.set_x(self.l_margin + 4)
+                self.multi_cell(self.epw - 4, 5.5,
+                                sanitize(desc[:300] + ("..." if len(desc) > 300 else "")),
+                                new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.ln(2)
+
+        self._separator()
+
+
+    def ai_iom_card(self, i, total, iom):
+        if self.get_y() > self.h - self.b_margin - 80:
+            self.add_page()
+
+        self.set_fill_color(*DARK)
+        self.rect(self.l_margin, self.get_y(), self.epw, 10, "F")
+        self.set_font("Helvetica", "B", 9)
+        self.set_text_color(*WHITE)
+        self.set_x(self.l_margin)
+        self.cell(self.epw, 10,
+                  sanitize(f"  [{i} of {total}]  {iom['resource_id']}"),
+                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        self.ln(1)
+
+        console_url = _console_url(iom)
+        fields = [
+            ("Rule",          iom.get("rule_name")),
+            ("Severity",      iom.get("severity")),
+            ("Service",       iom.get("service")),
+            ("Resource Type", iom.get("resource_type")),
+            ("Provider",      iom.get("provider")),
+            ("Account",       f"{iom.get('account_name', 'N/A')} ({iom.get('account_id', 'N/A')})"),
+            ("Region",        iom.get("region")),
+            ("Description",   iom.get("description")),
+        ]
+        col_w = self.epw - self.LABEL_W
+        for idx, (field, value) in enumerate(fields):
+            self.set_font("Helvetica", "", 8)
+            char_w = self.get_string_width("m") or 2.5
+            chars_per_line = max(1, int(col_w / char_w))
+            n_lines = max(1, -(-len(str(value or "N/A")) // chars_per_line))
+            field_h = n_lines * 6 + 4
+            if self.get_y() + field_h > self.h - self.b_margin:
+                self.add_page()
+            self.row(field, value, alt=idx % 2 == 0)
+        if console_url:
+            self.link_row("Console", console_url, alt=len(fields) % 2 == 0)
+        falcon_url = _falcon_iom_url(iom)
+        if falcon_url:
+            self.link_row("Falcon", falcon_url, alt=(len(fields) + (1 if console_url else 0)) % 2 == 0)
+        self.ln(3)
+
+        remediation = (iom.get("remediation") or "").strip()
+        if remediation:
+            if self.get_y() > self.h - self.b_margin - 40:
+                self.add_page()
+            self.sub_header("Remediation")
+            steps = remediation.split("|\n")
+            col_w = self.epw - 4
+            for step in steps:
+                step = step.strip()
+                if not step:
+                    continue
+                self.set_font("Helvetica", "", 7.5)
+                char_w = self.get_string_width("m") or 2.0
+                chars_per_line = max(1, int(col_w / char_w))
+                n_lines = max(1, -(-len(step) // chars_per_line))
+                step_h = n_lines * 5.5 + 4
+                if self.get_y() + step_h > self.h - self.b_margin:
+                    self.add_page()
+                self.set_text_color(*MID_GRAY)
+                self.set_x(self.l_margin + 4)
+                self.multi_cell(col_w, 5.5, sanitize(step),
+                                new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                self.ln(1)
+
+        self._separator()
+
+
+def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
+    output_file = ensure_timestamped_filename(config.get("output_file", OUTPUT_FILE))
 
             self.set_fill_color(*LIGHT_GRAY)
             self.set_font("Helvetica", "B", 8)
@@ -1528,13 +1857,14 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
     if config.get("include_vms"):
         pdf.add_page()
         total_vms = sum(vm_totals.values())
-        pdf.section_header(f"Unmanaged Running VMs  ({total_vms} total)")
+        pdf.section_header(f"Unmanaged Virtual Machines  ({total_vms} total)")
         for provider, assets in vm_data.items():
             pdf.sub_header(f"{provider}  -  {len(assets)} asset(s)")
             pdf.vm_table(assets)
 
     pdf.output(output_file)
     print(f"Report written to {output_file}")
+    print(f"Generated at: {now_utc_detailed()}")
 
 
 if __name__ == "__main__":
@@ -1592,7 +1922,7 @@ if __name__ == "__main__":
         for provider, vm_filter in vm_filters:
             print(f"{T_DIM}Fetching VMs:    {vm_filter}{T_RESET}")
             assets = fetch_unmanaged_vms(csa, vm_filter)
-            print(f"{T_DIM}  Found {len(assets)} asset(s) for {provider}.{T_RESET}")
+            print(f"{T_DIM}  Found {len(assets)} unmanaged Virtual Machine(s) for {provider}.{T_RESET}")
             vm_data[provider] = assets
 
     ai_packages = []
