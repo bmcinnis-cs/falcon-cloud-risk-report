@@ -198,8 +198,10 @@ def _prompt(label, default=""):
 
 def _prompt_yn(label, default=True):
     hint = "Y/n" if default else "y/N"
-    raw = _prompt(f"{label} ({hint})", "")
-    return raw.lower().startswith("y") if raw else default
+    raw = _prompt(label, hint)
+    if not raw or raw == hint:
+        return default
+    return raw.lower().startswith("y")
 
 
 def interactive_config():
