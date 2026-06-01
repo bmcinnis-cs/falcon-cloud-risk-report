@@ -3,52 +3,35 @@ import sys
 import json
 import argparse
 import textwrap
-import html as _html
+import html
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
-import re as _re
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections, Hosts
-from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections
 from fpdf import FPDF, XPos, YPos
 
-RISKS_FILTER = "status:'Open'+severity:'High'"
-# Updated VM approach: Use CloudSecurityAssets with exact Asset Explorer filters
 VM_FILTERS = [
     ("AWS",   "active:'true'+cloud_provider:'aws'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
     ("Azure", "active:'true'+cloud_provider:'azure'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
     ("GCP",   "active:'true'+cloud_provider:'gcp'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
 ]
 
-def get_default_output_filename():
-    """Generate a default output filename with timestamp"""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"falcon_cloud_security_report_{timestamp}.pdf"
-
 def ensure_timestamped_filename(filename):
-    """Ensure filename has timestamp for uniqueness"""
+    """Append YYYYMMDD_HHMMSS to a filename before the extension if not already present."""
     if not filename:
-        return get_default_output_filename()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"falcon_cloud_security_report_{timestamp}.pdf"
 
-    # Check if filename already has timestamp pattern (YYYYMMDD_HHMMSS)
-    import re
-    timestamp_pattern = r'_\d{8}_\d{6}'
+    if re.search(r'_\d{8}_\d{6}', filename):
+        return filename
 
-    if re.search(timestamp_pattern, filename):
-        return filename  # Already has timestamp
-
-    # Add timestamp before .pdf extension (case-insensitive)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if filename.lower().endswith('.pdf'):
-        base_name = filename[:-4]  # Remove .pdf/.PDF
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Preserve original extension case
-        extension = filename[-4:]  # Get original .pdf or .PDF
-        return f"{base_name}_{timestamp}{extension}"
-    else:
-        # Add .pdf and timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"{filename}_{timestamp}.pdf"
+        base, ext = filename[:-4], filename[-4:]
+        return f"{base}_{timestamp}{ext}"
+    return f"{filename}_{timestamp}.pdf"
 
 OUTPUT_FILE    = get_default_output_filename()
 OUTPUT_FILE    = "falcon_cloud_security_report.pdf"
@@ -279,8 +262,7 @@ def interactive_config():
     print()
 
     print(f"  {T_BOLD}Output{T_RESET}")
-    user_filename = _prompt("Output filename", OUTPUT_FILE)
-    config["output_file"] = ensure_timestamped_filename(user_filename)
+    config["output_file"] = ensure_timestamped_filename(_prompt("Output filename", OUTPUT_FILE))
     print()
 
     merged = {**_default_config(), **config}
@@ -447,7 +429,7 @@ def _strip_html(text):
         return text
 
     # <br> variants → newline
-    text = _re.sub(r'<br\s*/?>', '\n', text, flags=_re.IGNORECASE)
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
 
     # <a href="url">label</a>: keep label; append url when it adds information
     def _repl_anchor(m):
@@ -457,18 +439,18 @@ def _strip_html(text):
             return f"{label} ({href})"
         return label or href
 
-    text = _re.sub(
+    text = re.sub(
         r'<a\s[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>',
         _repl_anchor,
         text,
-        flags=_re.IGNORECASE | _re.DOTALL,
+        flags=re.IGNORECASE | re.DOTALL,
     )
 
     # Strip remaining tags
-    text = _re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'<[^>]+>', '', text)
 
     # Unescape HTML entities (&amp; → &, &lt; → <, &#39; → ', etc.)
-    text = _html.unescape(text)
+    text = html.unescape(text)
 
     return text
 
@@ -527,7 +509,6 @@ def fetch_cloud_ioas(sdk, ioa_severities=None):
 
 
 def fetch_unmanaged_vms(sdk, filter_str):
-    """Legacy function - kept for compatibility but no longer used"""
     ids = []
     after = None
     while True:
@@ -550,182 +531,6 @@ def fetch_unmanaged_vms(sdk, filter_str):
             raise RuntimeError(f"get_assets failed: {r['body'].get('errors')}")
         assets.extend(r["body"].get("resources") or [])
     return assets
-
-
-def fetch_vms_without_sensor(hosts_sdk, cloud_provider):
-    """
-    Fetch VMs without CrowdStrike Falcon sensor for a specific cloud provider.
-    Uses the Hosts API with proper service_provider field identification.
-
-    Args:
-        hosts_sdk: Hosts API SDK instance
-        cloud_provider: 'aws', 'azure', or 'gcp'
-
-    Returns:
-        List of host records representing VMs without sensor
-    """
-    hosts = []
-    offset = 0
-    batch_size = 1000
-
-    # Map cloud provider names to service_provider field values
-    service_provider_mapping = {
-        'aws': 'AWS',
-        'azure': 'AZURE',
-        'gcp': 'GCP'
-    }
-
-    target_provider = service_provider_mapping.get(cloud_provider.lower())
-    if not target_provider:
-        print(f"    Warning: Unknown cloud provider '{cloud_provider}'")
-        return []
-
-    print(f"    Querying hosts with service_provider:'{target_provider}'...")
-
-    while True:
-        try:
-            # Use proper API filter for service provider
-            r = hosts_sdk.query_devices_by_filter(
-                limit=batch_size,
-                offset=offset,
-                filter=f"service_provider:'{target_provider}'"
-            )
-
-            if r["status_code"] != 200:
-                dbg_response("query_devices_by_filter", r)
-                break
-
-            batch_ids = r["body"].get("resources") or []
-            if not batch_ids:
-                break
-
-            print(f"    Processing {len(batch_ids)} {target_provider} hosts...")
-
-            # Get detailed host information
-            host_details_r = hosts_sdk.get_device_details(ids=batch_ids)
-            if host_details_r["status_code"] != 200:
-                dbg_response("get_device_details", host_details_r)
-                offset += len(batch_ids)
-                continue
-
-            host_details = host_details_r["body"].get("resources") or []
-
-            # Process each host
-            for host in host_details:
-                # Verify service_provider matches (double-check API filter worked)
-                host_provider = host.get("service_provider", "").upper()
-                if host_provider != target_provider:
-                    continue
-
-                # Filter for actual VMs (exclude mobile devices, containers, etc.)
-                platform = host.get("platform_name", "")
-                hostname = host.get("hostname", "")
-
-                # Only include VM-like platforms, exclude mobile and container platforms
-                if platform in ['Android', 'iOS', 'ChromeOS'] or '/subscriptions/' in hostname:
-                    continue
-
-                # Check sensor status based on agent_version presence and validity
-                agent_version = host.get("agent_version", "")
-                has_sensor = bool(agent_version and agent_version != "No Sensor")
-
-                hosts.append({
-                    'device_id': host.get('device_id'),
-                    'hostname': host.get('hostname'),
-                    'platform_name': host.get('platform_name'),
-                    'external_ip': host.get('external_ip'),
-                    'internal_ip': host.get('local_ip'),
-                    'last_seen': host.get('last_seen'),
-                    'sensor_version': agent_version if has_sensor else 'No Sensor',
-                    'cloud_provider': cloud_provider,
-                    'instance_state': 'running' if host.get('last_seen') else 'unknown',
-                    'service_provider': host.get('service_provider', ''),
-                    'has_sensor': has_sensor
-                })
-
-            # Update offset for pagination
-            offset += len(batch_ids)
-
-            # Check if we've processed all hosts
-            meta = r["body"].get("meta", {})
-            total = meta.get("total", 0)
-            if offset >= total or len(batch_ids) == 0:
-                break
-
-        except Exception as e:
-            print(f"    Warning: Error processing hosts batch at offset {offset}: {e}")
-            offset += batch_size  # Skip this batch and continue
-
-    print(f"    Found {len(hosts)} {target_provider} VMs")
-    return hosts
-
-
-def fetch_cloud_vms_comprehensive(hosts_sdk, csa_sdk, cloud_provider):
-    """
-    Comprehensive approach: Use Hosts API with proper service_provider field
-    to accurately identify cloud VMs and their sensor status.
-
-    This addresses the discrepancy between Asset Explorer (109 Azure VMs without sensor)
-    and the original CloudSecurityAssets approach (0 VMs found).
-    """
-    cloud_vms = []
-
-    # Method 1: Use Hosts API with proper service_provider filtering
-    try:
-        all_vms = fetch_vms_without_sensor(hosts_sdk, cloud_provider)
-
-        # The function returns ALL VMs for the provider, now filter for sensor status
-        # For the report, we want VMs WITHOUT sensor (matching Asset Explorer logic)
-        vms_without_sensor = [vm for vm in all_vms if not vm.get('has_sensor', True)]
-
-        print(f"    Total {cloud_provider.upper()} VMs: {len(all_vms)}")
-        print(f"    VMs with sensor: {len(all_vms) - len(vms_without_sensor)}")
-        print(f"    VMs without sensor: {len(vms_without_sensor)}")
-
-        cloud_vms.extend(vms_without_sensor)
-
-    except Exception as e:
-        print(f"    Warning: Hosts API query failed: {e}")
-
-    # Method 2 (Fallback): Use CloudSecurityAssets API for governance view if Hosts API fails
-    if not cloud_vms:
-        provider_filters = {
-            'aws': "managed_by:'Unmanaged'+cloud_provider:'aws'+instance_state:'running'",
-            'azure': "managed_by:'Unmanaged'+cloud_provider:'azure'+instance_state:'running'",
-            'gcp': "managed_by:'Unmanaged'+cloud_provider:'gcp'+instance_state:'running'"
-        }
-
-        if cloud_provider in provider_filters:
-            try:
-                print(f"    Falling back to CloudSecurityAssets API...")
-                governance_vms = fetch_unmanaged_vms(csa_sdk, provider_filters[cloud_provider])
-                # Convert to standard format
-                for vm in governance_vms:
-                    cloud_vms.append({
-                        'device_id': vm.get('id'),
-                        'hostname': vm.get('asset_name') or vm.get('resource_name'),
-                        'platform_name': vm.get('platform_name', cloud_provider),
-                        'external_ip': vm.get('public_ip'),
-                        'internal_ip': vm.get('private_ip'),
-                        'last_seen': vm.get('last_seen'),
-                        'sensor_version': 'Unmanaged Resource',
-                        'cloud_provider': cloud_provider,
-                        'instance_state': vm.get('instance_state', 'unknown'),
-                        'has_sensor': False
-                    })
-            except Exception as e:
-                print(f"    Warning: CloudSecurityAssets API query also failed: {e}")
-
-    # Deduplicate by hostname/device_id
-    seen = set()
-    unique_vms = []
-    for vm in cloud_vms:
-        key = vm.get('hostname') or vm.get('device_id')
-        if key and key not in seen:
-            seen.add(key)
-            unique_vms.append(vm)
-
-    return unique_vms
 
 
 def _image_label(img):
@@ -910,7 +715,7 @@ def t_label(text):
 def print_risks(risks):
     width = 64
     print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
-    print(f"{T_BOLD}{T_CYAN}  FALCON CLOUD SECURITY -- OPEN HIGH SEVERITY RISKS{T_RESET}")
+    print(f"{T_BOLD}{T_CYAN}  FALCON CLOUD SECURITY -- CLOUD RISKS{T_RESET}")
     print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
     print(f"  {t_label('Total risks found:')} {T_BOLD}{T_WHITE}{len(risks)}{T_RESET}")
     print(f"{T_BOLD}{T_CYAN}{'=' * width}{T_RESET}")
@@ -1103,7 +908,7 @@ def _falcon_iom_url(iom):
     if api_base == "https://api.crowdstrike.com":
         console = "https://falcon.crowdstrike.com"
     else:
-        m = _re.search(r"https://api\.([^/]+)\.crowdstrike\.com", api_base)
+        m = re.search(r"https://api\.([^/]+)\.crowdstrike\.com", api_base)
         if m:
             console = f"https://{m.group(1)}.falcon.crowdstrike.com"
         else:
@@ -1195,22 +1000,117 @@ def _console_url(iom):
         return f"{b}/console/home?region={region}"
 
     if provider == "GCP":
-        proj = acct
-        if "compute.googleapis.com/instancegroupmanager" in raw: return f"https://console.cloud.google.com/compute/instancegroups/list?project={proj}"
-        if "compute.googleapis.com/instance"   in raw: return f"https://console.cloud.google.com/compute/instances?project={proj}"
-        if "compute.googleapis.com/disk"       in raw: return f"https://console.cloud.google.com/compute/disks?project={proj}"
-        if "compute.googleapis.com/firewall"   in raw: return f"https://console.cloud.google.com/networking/firewalls/list?project={proj}"
-        if "compute.googleapis.com/network"    in raw: return f"https://console.cloud.google.com/networking/networks/list?project={proj}"
-        if "compute.googleapis.com/subnetwork" in raw: return f"https://console.cloud.google.com/networking/subnetworks/list?project={proj}"
-        if "storage.googleapis.com"            in raw: return f"https://console.cloud.google.com/storage/browser/{rid}?project={proj}"
-        if "iam.googleapis.com"                in raw: return f"https://console.cloud.google.com/iam-admin/iam?project={proj}"
-        if "container.googleapis.com"          in raw: return f"https://console.cloud.google.com/kubernetes/list?project={proj}"
-        if "aiplatform.googleapis.com"         in raw: return f"https://console.cloud.google.com/vertex-ai?project={proj}"
-        if "secretmanager.googleapis.com"      in raw: return f"https://console.cloud.google.com/security/secret-manager?project={proj}"
-        if "pubsub.googleapis.com"             in raw: return f"https://console.cloud.google.com/cloudpubsub/topic/list?project={proj}"
-        if "artifactregistry.googleapis.com"   in raw: return f"https://console.cloud.google.com/artifacts?project={proj}"
-        if "logging.googleapis.com"            in raw: return f"https://console.cloud.google.com/logs?project={proj}"
-        return f"https://console.cloud.google.com/home/dashboard?project={proj}"
+        b = "https://console.cloud.google.com"
+        # rid holds the full GCP resource name: //SERVICE.googleapis.com/projects/{proj_id}/...
+        # account_id holds "projects/{PROJECT_NUMBER}" (numeric); proj_id is the human-readable slug
+        m_proj     = re.search(r'/projects/([^/]+)', rid)
+        proj_id    = m_proj.group(1) if m_proj else acct.split("/")[-1]
+        m_zone     = re.search(r'/zones/([^/]+)/', rid + "/")
+        zone       = m_zone.group(1) if m_zone else ""
+        m_reg      = re.search(r'/regions/([^/]+)/', rid + "/")
+        rid_region = m_reg.group(1) if m_reg else ""
+        m_loc      = re.search(r'/locations/([^/]+)/', rid + "/")
+        loc        = m_loc.group(1) if m_loc else ""
+        name       = rid.rstrip("/").split("/")[-1] if rid else ""
+
+        # instancegroupmanager before instance; subnetwork before network;
+        # nodepool/serviceaccountkey before their base types.
+        if "compute.googleapis.com/instancegroupmanager" in raw:
+            z = zone or rid_region
+            scope = "regions" if (rid_region and not zone) else "zones"
+            if z and name:
+                return f"{b}/compute/instanceGroups/details/{scope}/{z}/{name}?project={proj_id}"
+            return f"{b}/compute/instancegroups/list?project={proj_id}"
+
+        if "compute.googleapis.com/instance" in raw:
+            if zone and name:
+                return f"{b}/compute/instancesDetail/zones/{zone}/instances/{name}?project={proj_id}"
+            return f"{b}/compute/instances?project={proj_id}"
+
+        if "compute.googleapis.com/disk" in raw:
+            if zone and name:
+                return f"{b}/compute/disksDetail/zones/{zone}/disks/{name}?project={proj_id}"
+            return f"{b}/compute/disks?project={proj_id}"
+
+        if "compute.googleapis.com/firewall" in raw:
+            if name:
+                return f"{b}/networking/firewalls/details/{name}?project={proj_id}"
+            return f"{b}/networking/firewalls/list?project={proj_id}"
+
+        if "compute.googleapis.com/subnetwork" in raw:
+            r_sub = rid_region or region
+            if r_sub and name:
+                return f"{b}/networking/subnetworks/details/{r_sub}/{name}?project={proj_id}"
+            return f"{b}/networking/subnetworks/list?project={proj_id}"
+
+        if "compute.googleapis.com/network" in raw:
+            if name:
+                return f"{b}/networking/networks/details/{name}?project={proj_id}"
+            return f"{b}/networking/networks/list?project={proj_id}"
+
+        if "storage.googleapis.com" in raw:
+            # rid: //storage.googleapis.com/{bucket-name} — name is the bucket
+            if name:
+                return f"{b}/storage/browser/{name}?project={proj_id}"
+            return f"{b}/storage/browser?project={proj_id}"
+
+        if "container.googleapis.com/nodepool" in raw:
+            # rid: .../clusters/{cluster}/nodePools/{pool}
+            parts_rid = rid.rstrip("/").split("/")
+            pool    = parts_rid[-1] if parts_rid else name
+            cluster = parts_rid[-3] if len(parts_rid) >= 3 else ""
+            z = zone or rid_region or loc
+            if z and cluster:
+                return f"{b}/kubernetes/clusters/details/{z}/{cluster}/node-pools/{pool}?project={proj_id}"
+            return f"{b}/kubernetes/list?project={proj_id}"
+
+        if "container.googleapis.com" in raw:
+            z = zone or rid_region or loc
+            if z and name:
+                return f"{b}/kubernetes/clusters/details/{z}/{name}?project={proj_id}"
+            return f"{b}/kubernetes/list?project={proj_id}"
+
+        if "iam.googleapis.com/serviceaccountkey" in raw:
+            # rid: .../serviceAccounts/{sa_email}/keys/{key_id}
+            parts_rid = rid.rstrip("/").split("/")
+            sa = parts_rid[-3] if len(parts_rid) >= 3 else ""
+            if sa:
+                return f"{b}/iam-admin/serviceaccounts/details/{sa}/keys?project={proj_id}"
+            return f"{b}/iam-admin/serviceaccounts?project={proj_id}"
+
+        if "iam.googleapis.com/serviceaccount" in raw:
+            if name:
+                return f"{b}/iam-admin/serviceaccounts/details/{name}?project={proj_id}"
+            return f"{b}/iam-admin/serviceaccounts?project={proj_id}"
+
+        if "iam.googleapis.com" in raw:
+            return f"{b}/iam-admin/iam?project={proj_id}"
+
+        if "aiplatform.googleapis.com" in raw:
+            return f"{b}/vertex-ai?project={proj_id}"
+
+        if "secretmanager.googleapis.com" in raw:
+            if name:
+                return f"{b}/security/secret-manager/secret/{name}?project={proj_id}"
+            return f"{b}/security/secret-manager?project={proj_id}"
+
+        if "pubsub.googleapis.com" in raw:
+            if name:
+                return f"{b}/cloudpubsub/topic/detail/{name}?project={proj_id}"
+            return f"{b}/cloudpubsub/topic/list?project={proj_id}"
+
+        if "artifactregistry.googleapis.com" in raw:
+            if loc and name:
+                return f"{b}/artifacts/docker/{proj_id}/{loc}/{name}?project={proj_id}"
+            return f"{b}/artifacts?project={proj_id}"
+
+        if "logging.googleapis.com" in raw:
+            return f"{b}/logs?project={proj_id}"
+
+        if "cloudresourcemanager.googleapis.com" in raw:
+            return f"{b}/home/dashboard?project={proj_id}"
+
+        return f"{b}/home/dashboard?project={proj_id}"
 
     if provider in ("AZURE", "MICROSOFT"):
         if rid.startswith("/subscriptions/"):
@@ -1636,15 +1536,7 @@ class FalconReport(FPDF):
             ("Region",        iom.get("region")),
             ("Description",   iom.get("description")),
         ]
-        col_w = self.epw - self.LABEL_W
         for idx, (field, value) in enumerate(fields):
-            self.set_font("Helvetica", "", 8)
-            char_w = self.get_string_width("m") or 2.5
-            chars_per_line = max(1, int(col_w / char_w))
-            n_lines = max(1, -(-len(str(value or "N/A")) // chars_per_line))
-            field_h = n_lines * 6 + 4
-            if self.get_y() + field_h > self.h - self.b_margin:
-                self.add_page()
             self.row(field, value, alt=idx % 2 == 0)
         if console_url:
             self.link_row("Console", console_url, alt=len(fields) % 2 == 0)
@@ -1957,4 +1849,3 @@ if __name__ == "__main__":
 
     print(f"{T_DIM}Building PDF...{T_RESET}")
     build_pdf(risks, ioas, vm_data, ai_packages, ioms, config)
-    print(f"{T_BOLD}{T_CYAN}PDF written to {config['output_file']}{T_RESET}")
