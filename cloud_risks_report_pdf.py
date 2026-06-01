@@ -998,22 +998,117 @@ def _console_url(iom):
         return f"{b}/console/home?region={region}"
 
     if provider == "GCP":
-        proj = acct
-        if "compute.googleapis.com/instancegroupmanager" in raw: return f"https://console.cloud.google.com/compute/instancegroups/list?project={proj}"
-        if "compute.googleapis.com/instance"   in raw: return f"https://console.cloud.google.com/compute/instances?project={proj}"
-        if "compute.googleapis.com/disk"       in raw: return f"https://console.cloud.google.com/compute/disks?project={proj}"
-        if "compute.googleapis.com/firewall"   in raw: return f"https://console.cloud.google.com/networking/firewalls/list?project={proj}"
-        if "compute.googleapis.com/network"    in raw: return f"https://console.cloud.google.com/networking/networks/list?project={proj}"
-        if "compute.googleapis.com/subnetwork" in raw: return f"https://console.cloud.google.com/networking/subnetworks/list?project={proj}"
-        if "storage.googleapis.com"            in raw: return f"https://console.cloud.google.com/storage/browser/{rid}?project={proj}"
-        if "iam.googleapis.com"                in raw: return f"https://console.cloud.google.com/iam-admin/iam?project={proj}"
-        if "container.googleapis.com"          in raw: return f"https://console.cloud.google.com/kubernetes/list?project={proj}"
-        if "aiplatform.googleapis.com"         in raw: return f"https://console.cloud.google.com/vertex-ai?project={proj}"
-        if "secretmanager.googleapis.com"      in raw: return f"https://console.cloud.google.com/security/secret-manager?project={proj}"
-        if "pubsub.googleapis.com"             in raw: return f"https://console.cloud.google.com/cloudpubsub/topic/list?project={proj}"
-        if "artifactregistry.googleapis.com"   in raw: return f"https://console.cloud.google.com/artifacts?project={proj}"
-        if "logging.googleapis.com"            in raw: return f"https://console.cloud.google.com/logs?project={proj}"
-        return f"https://console.cloud.google.com/home/dashboard?project={proj}"
+        b = "https://console.cloud.google.com"
+        # rid holds the full GCP resource name: //SERVICE.googleapis.com/projects/{proj_id}/...
+        # account_id holds "projects/{PROJECT_NUMBER}" (numeric); proj_id is the human-readable slug
+        m_proj     = re.search(r'/projects/([^/]+)', rid)
+        proj_id    = m_proj.group(1) if m_proj else acct.split("/")[-1]
+        m_zone     = re.search(r'/zones/([^/]+)/', rid + "/")
+        zone       = m_zone.group(1) if m_zone else ""
+        m_reg      = re.search(r'/regions/([^/]+)/', rid + "/")
+        rid_region = m_reg.group(1) if m_reg else ""
+        m_loc      = re.search(r'/locations/([^/]+)/', rid + "/")
+        loc        = m_loc.group(1) if m_loc else ""
+        name       = rid.rstrip("/").split("/")[-1] if rid else ""
+
+        # instancegroupmanager before instance; subnetwork before network;
+        # nodepool/serviceaccountkey before their base types.
+        if "compute.googleapis.com/instancegroupmanager" in raw:
+            z = zone or rid_region
+            scope = "regions" if (rid_region and not zone) else "zones"
+            if z and name:
+                return f"{b}/compute/instanceGroups/details/{scope}/{z}/{name}?project={proj_id}"
+            return f"{b}/compute/instancegroups/list?project={proj_id}"
+
+        if "compute.googleapis.com/instance" in raw:
+            if zone and name:
+                return f"{b}/compute/instancesDetail/zones/{zone}/instances/{name}?project={proj_id}"
+            return f"{b}/compute/instances?project={proj_id}"
+
+        if "compute.googleapis.com/disk" in raw:
+            if zone and name:
+                return f"{b}/compute/disksDetail/zones/{zone}/disks/{name}?project={proj_id}"
+            return f"{b}/compute/disks?project={proj_id}"
+
+        if "compute.googleapis.com/firewall" in raw:
+            if name:
+                return f"{b}/networking/firewalls/details/{name}?project={proj_id}"
+            return f"{b}/networking/firewalls/list?project={proj_id}"
+
+        if "compute.googleapis.com/subnetwork" in raw:
+            r_sub = rid_region or region
+            if r_sub and name:
+                return f"{b}/networking/subnetworks/details/{r_sub}/{name}?project={proj_id}"
+            return f"{b}/networking/subnetworks/list?project={proj_id}"
+
+        if "compute.googleapis.com/network" in raw:
+            if name:
+                return f"{b}/networking/networks/details/{name}?project={proj_id}"
+            return f"{b}/networking/networks/list?project={proj_id}"
+
+        if "storage.googleapis.com" in raw:
+            # rid: //storage.googleapis.com/{bucket-name} — name is the bucket
+            if name:
+                return f"{b}/storage/browser/{name}?project={proj_id}"
+            return f"{b}/storage/browser?project={proj_id}"
+
+        if "container.googleapis.com/nodepool" in raw:
+            # rid: .../clusters/{cluster}/nodePools/{pool}
+            parts_rid = rid.rstrip("/").split("/")
+            pool    = parts_rid[-1] if parts_rid else name
+            cluster = parts_rid[-3] if len(parts_rid) >= 3 else ""
+            z = zone or rid_region or loc
+            if z and cluster:
+                return f"{b}/kubernetes/clusters/details/{z}/{cluster}/node-pools/{pool}?project={proj_id}"
+            return f"{b}/kubernetes/list?project={proj_id}"
+
+        if "container.googleapis.com" in raw:
+            z = zone or rid_region or loc
+            if z and name:
+                return f"{b}/kubernetes/clusters/details/{z}/{name}?project={proj_id}"
+            return f"{b}/kubernetes/list?project={proj_id}"
+
+        if "iam.googleapis.com/serviceaccountkey" in raw:
+            # rid: .../serviceAccounts/{sa_email}/keys/{key_id}
+            parts_rid = rid.rstrip("/").split("/")
+            sa = parts_rid[-3] if len(parts_rid) >= 3 else ""
+            if sa:
+                return f"{b}/iam-admin/serviceaccounts/details/{sa}/keys?project={proj_id}"
+            return f"{b}/iam-admin/serviceaccounts?project={proj_id}"
+
+        if "iam.googleapis.com/serviceaccount" in raw:
+            if name:
+                return f"{b}/iam-admin/serviceaccounts/details/{name}?project={proj_id}"
+            return f"{b}/iam-admin/serviceaccounts?project={proj_id}"
+
+        if "iam.googleapis.com" in raw:
+            return f"{b}/iam-admin/iam?project={proj_id}"
+
+        if "aiplatform.googleapis.com" in raw:
+            return f"{b}/vertex-ai?project={proj_id}"
+
+        if "secretmanager.googleapis.com" in raw:
+            if name:
+                return f"{b}/security/secret-manager/secret/{name}?project={proj_id}"
+            return f"{b}/security/secret-manager?project={proj_id}"
+
+        if "pubsub.googleapis.com" in raw:
+            if name:
+                return f"{b}/cloudpubsub/topic/detail/{name}?project={proj_id}"
+            return f"{b}/cloudpubsub/topic/list?project={proj_id}"
+
+        if "artifactregistry.googleapis.com" in raw:
+            if loc and name:
+                return f"{b}/artifacts/docker/{proj_id}/{loc}/{name}?project={proj_id}"
+            return f"{b}/artifacts?project={proj_id}"
+
+        if "logging.googleapis.com" in raw:
+            return f"{b}/logs?project={proj_id}"
+
+        if "cloudresourcemanager.googleapis.com" in raw:
+            return f"{b}/home/dashboard?project={proj_id}"
+
+        return f"{b}/home/dashboard?project={proj_id}"
 
     if provider in ("AZURE", "MICROSOFT"):
         if rid.startswith("/subscriptions/"):
