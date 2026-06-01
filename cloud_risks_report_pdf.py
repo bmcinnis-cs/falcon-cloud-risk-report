@@ -10,6 +10,7 @@ import re as _re
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections, Hosts
+from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, CloudSecurityDetections
 from fpdf import FPDF, XPos, YPos
 
 RISKS_FILTER = "status:'Open'+severity:'High'"
@@ -50,6 +51,7 @@ def ensure_timestamped_filename(filename):
         return f"{filename}_{timestamp}.pdf"
 
 OUTPUT_FILE    = get_default_output_filename()
+OUTPUT_FILE    = "falcon_cloud_security_report.pdf"
 DEFAULTS_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".report_defaults.json")
 
 VALID_SEVERITIES = ["Critical", "High", "Medium", "Low", "Informational"]
@@ -199,6 +201,7 @@ def interactive_config():
     config["include_risks"] = _prompt_yn("Include Cloud Risks", default=True)
     config["include_ioas"]  = _prompt_yn("Include Cloud IOA Detections", default=True)
     config["include_vms"]   = _prompt_yn("Include Unmanaged Virtual Machines", default=True)
+    config["include_vms"]   = _prompt_yn("Include Unmanaged VMs", default=True)
     config["include_ai_packages"] = _prompt_yn("Include AI Package Risks (Critical CVEs)", default=True)
     print()
 
@@ -1679,6 +1682,106 @@ class FalconReport(FPDF):
 
 def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
     output_file = ensure_timestamped_filename(config.get("output_file", OUTPUT_FILE))
+
+            self.set_fill_color(*LIGHT_GRAY)
+            self.set_font("Helvetica", "B", 8)
+            self.set_text_color(*DARK)
+            self.set_x(self.l_margin)
+            self.cell(self.epw, 7, sanitize(f"  {vuln.get('cveid', 'N/A')}"),
+                      fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+            self.set_font("Helvetica", "B", 8)
+            self.set_text_color(*AMBER)
+            self.set_x(self.l_margin + 4)
+            self.cell(self.epw - 4, 6, sanitize(f"Fix: {fix_str}"),
+                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+            desc = (vuln.get("description") or "").strip()
+            if desc:
+                if self.get_y() > self.h - self.b_margin - 20:
+                    self.add_page()
+                self.set_font("Helvetica", "", 7.5)
+                self.set_text_color(*MID_GRAY)
+                self.set_x(self.l_margin + 4)
+                self.multi_cell(self.epw - 4, 5.5,
+                                sanitize(desc[:300] + ("..." if len(desc) > 300 else "")),
+                                new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.ln(2)
+
+        self._separator()
+
+
+    def ai_iom_card(self, i, total, iom):
+        if self.get_y() > self.h - self.b_margin - 80:
+            self.add_page()
+
+        self.set_fill_color(*DARK)
+        self.rect(self.l_margin, self.get_y(), self.epw, 10, "F")
+        self.set_font("Helvetica", "B", 9)
+        self.set_text_color(*WHITE)
+        self.set_x(self.l_margin)
+        self.cell(self.epw, 10,
+                  sanitize(f"  [{i} of {total}]  {iom['resource_id']}"),
+                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        self.ln(1)
+
+        console_url = _console_url(iom)
+        fields = [
+            ("Rule",          iom.get("rule_name")),
+            ("Severity",      iom.get("severity")),
+            ("Service",       iom.get("service")),
+            ("Resource Type", iom.get("resource_type")),
+            ("Provider",      iom.get("provider")),
+            ("Account",       f"{iom.get('account_name', 'N/A')} ({iom.get('account_id', 'N/A')})"),
+            ("Region",        iom.get("region")),
+            ("Description",   iom.get("description")),
+        ]
+        col_w = self.epw - self.LABEL_W
+        for idx, (field, value) in enumerate(fields):
+            self.set_font("Helvetica", "", 8)
+            char_w = self.get_string_width("m") or 2.5
+            chars_per_line = max(1, int(col_w / char_w))
+            n_lines = max(1, -(-len(str(value or "N/A")) // chars_per_line))
+            field_h = n_lines * 6 + 4
+            if self.get_y() + field_h > self.h - self.b_margin:
+                self.add_page()
+            self.row(field, value, alt=idx % 2 == 0)
+        if console_url:
+            self.link_row("Console", console_url, alt=len(fields) % 2 == 0)
+        falcon_url = _falcon_iom_url(iom)
+        if falcon_url:
+            self.link_row("Falcon", falcon_url, alt=(len(fields) + (1 if console_url else 0)) % 2 == 0)
+        self.ln(3)
+
+        remediation = (iom.get("remediation") or "").strip()
+        if remediation:
+            if self.get_y() > self.h - self.b_margin - 40:
+                self.add_page()
+            self.sub_header("Remediation")
+            steps = remediation.split("|\n")
+            col_w = self.epw - 4
+            for step in steps:
+                step = step.strip()
+                if not step:
+                    continue
+                self.set_font("Helvetica", "", 7.5)
+                char_w = self.get_string_width("m") or 2.0
+                chars_per_line = max(1, int(col_w / char_w))
+                n_lines = max(1, -(-len(step) // chars_per_line))
+                step_h = n_lines * 5.5 + 4
+                if self.get_y() + step_h > self.h - self.b_margin:
+                    self.add_page()
+                self.set_text_color(*MID_GRAY)
+                self.set_x(self.l_margin + 4)
+                self.multi_cell(col_w, 5.5, sanitize(step),
+                                new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                self.ln(1)
+
+        self._separator()
+
+
+def build_pdf(risks, ioas, vm_data, ai_packages, ioms, config):
+    output_file = config.get("output_file", OUTPUT_FILE)
     vm_totals = {provider: len(assets) for provider, assets in vm_data.items()}
     iom_cats = config.get("iom_categories", [])
     iom_sevs = config.get("iom_severities", [])
