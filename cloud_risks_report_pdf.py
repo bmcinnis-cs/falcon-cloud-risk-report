@@ -13,9 +13,9 @@ from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, Contain
 from fpdf import FPDF, XPos, YPos
 
 VM_FILTERS = [
-    ("AWS",   "active:'true'+cloud_provider:'aws'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
-    ("Azure", "active:'true'+cloud_provider:'azure'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
-    ("GCP",   "active:'true'+cloud_provider:'gcp'+resource_type_name:'Virtual Machines'+managed_by:'Unmanaged'"),
+    ("AWS",   "active:'true'+cloud_provider:'aws'+resource_type_name:'EC2 Instance'+managed_by:'Unmanaged'"),
+    ("Azure", "active:'true'+cloud_provider:'azure'+resource_type_name:'Virtual Machine'+managed_by:'Unmanaged'"),
+    ("GCP",   "active:'true'+cloud_provider:'gcp'+resource_type_name:'Compute Instance'+managed_by:'Unmanaged'"),
 ]
 
 def ensure_timestamped_filename(filename):
