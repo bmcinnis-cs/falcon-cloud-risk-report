@@ -1,23 +1,21 @@
 # Falcon Cloud Risk Report
 
-> Automated PDF report combining open cloud risks, Cloud IOA detections, AI package CVEs, cloud service misconfigurations, and unmanaged running VMs from [CrowdStrike Falcon Cloud Security](https://www.crowdstrike.com/platform/cloud-security/) using the [FalconPy SDK](https://github.com/CrowdStrike/falconpy).
+> Automated PDF report combining cloud risks, IOA detections, cloud applications, AI package CVEs, cloud service misconfigurations, and unmanaged running VMs from [CrowdStrike Falcon Cloud Security](https://www.crowdstrike.com/platform/cloud-security/) using the [FalconPy SDK](https://github.com/CrowdStrike/falconpy).
 
 ---
 
 ## What It Produces
 
-A single PDF with a cover page, a clickable table of contents, and up to five content sections — each togglable at runtime:
+A single PDF with a cover page, a clickable table of contents, and four logical sections — each togglable at runtime:
 
-| Page | Content |
+| Section | Subsections |
 |---|---|
 | **Cover** | Section counts, active filter summary, and generation timestamp |
-| **Table of Contents** | Clickable page-linked index of every included section |
-| **Cloud Risks** | Rule name, description, asset, account, region, and risk factors with remediation steps |
-| **Cloud IOA Detections** | Event name, description, severity, MITRE tactic/technique, user, region, and timestamp |
-| **AI Package Risks** | AI-related container packages with CVEs — CVE ID, description, fix version, and affected image names |
-| **Cloud Service IOMs** | Active misconfigurations filtered by service category and severity, with remediation steps, cloud console deep-links, and Falcon links |
-| **Risky Images** | Container images with CVEs — per-image layer breakdown showing which `RUN` layer introduced each CVE, CVSS score, package, exploit/fix flags, and a Falcon console deep-link |
-| **Unmanaged Running VMs** | Table of unmanaged, running VMs scoped to your selected cloud providers |
+| **Table of Contents** | Clickable page-linked index of every included subsection |
+| **1 — Cloud Infra** | **Cloud IOA Detections** · Event name, severity, MITRE tactic/technique, user, region, timestamp<br>**Cloud Risks** · Rule name, description, asset, account, region, risk factors, remediation<br>**Cloud Service IOMs** · Active misconfigurations with remediation steps, cloud console deep-links, and Falcon links |
+| **2 — Cloud Apps** | **Cloud Applications** · App name, deployment type, technologies, account, region, vulnerability count, ExPRT ratings<br>**Risky Container Images** · Per-image CVE layer breakdown — layer command, CVE ID, CVSS, package, exploit/fix flags, Falcon deep-link |
+| **3 — Shadow AI** | **AI Services** · IOMs scoped to AI cloud services (SageMaker, Bedrock, Vertex AI, etc.)<br>**AI Package Risks** · AI-related container packages with CVEs — CVE ID, description, fix version, affected images |
+| **4 — Unmanaged VMs** | **Unmanaged Virtual Machines** · Table of unmanaged, running VMs scoped to selected cloud providers |
 
 ---
 
@@ -99,7 +97,7 @@ python cloud_risks_report_pdf.py -i -d
 
 ## Interactive Mode
 
-Pass `-i` or `--interactive` to configure the report before any API calls are made. You will be stepped through each section — press **Enter** to accept the default shown in `[ ]`.
+Pass `-i` or `--interactive` to configure the report before any API calls are made. You will be stepped through each of the four sections — press **Enter** to accept the default shown in `[ ]`.
 
 ```
   ──────────────────────────────────────────────────────────
@@ -107,12 +105,14 @@ Pass `-i` or `--interactive` to configure the report before any API calls are ma
   Press Enter to accept the default shown in [ ]
   ──────────────────────────────────────────────────────────
 
-  ▸ Sections
-  Include Cloud Risks (Y/n)
-  Include Cloud IOA Detections (Y/n)
-  Include Unmanaged Virtual Machines (Y/n)
-  Include AI Package Risks (Critical CVEs) (Y/n)
-  Include Risky Images (CVE layer breakdown) (y/N)
+  ▸ Section 1 — Cloud Infra
+  Include Cloud IOA Detections  [Y/n]
+  Include Cloud Risks  [Y/n]
+  Include Cloud IOMs  (categories: all, none, or comma-separated)  [none]
+
+  ▸ Cloud IOA Filters
+  Available severities: Critical, High, Medium, Low, Informational, all
+  IOA severity (comma-separated, or all)  [all]
 
   ▸ Risk Filters
   Available severities: Critical, High, Medium, Low, Informational
@@ -122,56 +122,72 @@ Pass `-i` or `--interactive` to configure the report before any API calls are ma
   Available providers: aws, azure, gcp, all
   Cloud provider  [all]
 
-  ▸ Cloud IOA Filters
-  Available severities: Critical, High, Medium, Low, Informational, all
-  IOA severity (comma-separated, or all)  [all]
+  ▸ Section 2 — Cloud Apps
+  Include Cloud Applications  [Y/n]
+  Include Risky Container Images  [Y/n]
 
-  ▸ AI Package Filters
-  Available severities: Critical, High, Medium, Low, Informational, all
-  Package severity (comma-separated, or all)  [Critical]
+  ▸ Cloud Applications Filters
+  Max applications to include  [50]
 
   ▸ Risky Images Filters
   Available severities: Critical, High, Medium, Low, Informational, all
   CVE severity (comma-separated, or all)  [Critical]
   Max images to include  [10]
 
+  ▸ Section 3 — Shadow AI
+  Include AI Services (cloud IOMs — AI category)  [Y/n]
+  Include AI Package Risks  [Y/n]
+
+  ▸ AI Services Filters
+  Available severities: Critical, High, Medium, Low, Informational, all
+  AI Services severity (comma-separated, or all)  [all]
+
+  ▸ AI Package Filters
+  Available severities: Critical, High, Medium, Low, Informational, all
+  Package severity (comma-separated, or all)  [Critical]
+
+  ▸ Section 4 — Unmanaged VMs
+  Include Unmanaged Virtual Machines  [Y/n]
+
   ▸ VM Filters
   Available providers: AWS, Azure, GCP
   VM providers (comma-separated)  [AWS,Azure,GCP]
 
-  ▸ IOM / Misconfiguration Filters
-  Available categories: account, ai, compute, containers, database, iam, networking, secrets, serverless, storage, all
-  Enter 'none' or leave blank to skip the IOM section.
-  IOM categories (comma-separated, all, or none)  [none]
-  Available severities: Critical, High, Medium, Low, Informational, all
-  IOM severity (comma-separated, or all)  [all]
-
   ▸ Output
   Output filename  [falcon_cloud_security_report.pdf]
-  Save as new defaults (y/N)
+  Save as new defaults  [y/N]
 ```
 
-> The IOM severity prompt only appears when at least one category is selected.
+> Filter sub-prompts only appear when the corresponding section is enabled.
 
 ### Options reference
 
 | Prompt | Accepted values | Default |
 |---|---|---|
-| Include Cloud Risks | `y` / `n` | `y` |
+| **Section 1 — Cloud Infra** | | |
 | Include Cloud IOA Detections | `y` / `n` | `y` |
-| Include Unmanaged Virtual Machines | `y` / `n` | `y` |
-| Include AI Package Risks | `y` / `n` | `y` (interactive) / `n` (non-interactive) |
-| Include Risky Images | `y` / `n` | `n` |
-| Risk severity | `Critical`, `High`, `Medium`, `Low`, `Informational` (comma-separated) | `High` |
+| Include Cloud Risks | `y` / `n` | `y` |
+| Include Cloud IOMs | category names, `all`, or `none` | `none` |
+| IOA severity | `Critical`, `High`, `Medium`, `Low`, `Informational`, or `all` | `all` |
+| Risk severity | Any severity above (comma-separated) | `High` |
 | Risk status | `Open`, `Closed`, `all` | `Open` |
 | Risk cloud provider | `aws`, `azure`, `gcp`, `all` | `all` |
-| IOA severity | Any severity above, or `all` | `all` |
-| Package severity | Any severity above, or `all` | `Critical` |
+| IOM severity | Any severity above, or `all` | `all` |
+| **Section 2 — Cloud Apps** | | |
+| Include Cloud Applications | `y` / `n` | `y` (interactive) / `n` (non-interactive) |
+| Include Risky Container Images | `y` / `n` | `y` (interactive) / `n` (non-interactive) |
+| Max applications | Any positive integer | `50` |
 | Risky Images CVE severity | Any severity above, or `all` | `Critical` |
 | Max Risky Images | Any positive integer | `10` |
+| **Section 3 — Shadow AI** | | |
+| Include AI Services | `y` / `n` | `y` (interactive) / `n` (non-interactive) |
+| Include AI Package Risks | `y` / `n` | `y` (interactive) / `n` (non-interactive) |
+| AI Services severity | Any severity above, or `all` | `all` |
+| Package severity | Any severity above, or `all` | `Critical` |
+| **Section 4 — Unmanaged VMs** | | |
+| Include Unmanaged Virtual Machines | `y` / `n` | `y` |
 | VM providers | `AWS`, `Azure`, `GCP` (comma-separated) | `AWS,Azure,GCP` |
-| IOM categories | Any category below, comma-separated, `all`, or `none` | `none` |
-| IOM severity | Any severity above, or `all` | `all` |
+| **Output** | | |
 | Output filename | Any valid `.pdf` filename | `falcon_cloud_security_report.pdf` |
 | Save as new defaults | `y` / `n` | `n` |
 
@@ -191,7 +207,7 @@ Running without `-i` uses these defaults (or saved defaults from `.report_defaul
 
 | Setting | Default value |
 |---|---|
-| Sections | Risks, IOAs, VMs included; AI Packages, Risky Images, and IOMs excluded |
+| Sections | Cloud IOAs, Risks, VMs included; Cloud IOMs, Cloud Apps, Risky Images, AI Services, AI Packages excluded |
 | Risk severity | High |
 | Risk status | Open |
 | Risk cloud provider | all |
