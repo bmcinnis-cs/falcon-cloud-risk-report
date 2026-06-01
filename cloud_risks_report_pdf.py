@@ -917,8 +917,8 @@ def _falcon_iom_url(iom):
     rule_uuid   = parts[6] if len(parts) >= 7 else ""  # segment 6 = rule UUID
     severity    = (iom.get("severity") or "high").lower()
 
-    # Pipes encode as %7C; colons in resource_type stay bare
-    encoded_id = entity_id.replace("|", "%7C")
+    # Pipes encode as %7C; forward slashes in resource_id (e.g. ECR repo names) encode as %2F
+    encoded_id = entity_id.replace("|", "%7C").replace("/", "%2F")
 
     filter_str = (
         f"extension_status:'Unresolved'"
