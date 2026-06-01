@@ -213,13 +213,24 @@ def interactive_config():
 
     config = {}
 
-    print(f"  {T_BOLD}{T_HEADER}▸ Sections{T_RESET}")
-    config["include_risks"] = _prompt_yn("Include Cloud Risks", default=True)
+    # ── Section 1: Cloud Infra ────────────────────────────────────────────────
+    print(f"  {T_BOLD}{T_HEADER}▸ Section 1 — Cloud Infra{T_RESET}")
     config["include_ioas"]  = _prompt_yn("Include Cloud IOA Detections", default=True)
-    config["include_vms"]   = _prompt_yn("Include Unmanaged Virtual Machines", default=True)
-    config["include_ai_packages"] = _prompt_yn("Include AI Package Risks (Critical CVEs)", default=True)
-    config["include_risky_images"] = _prompt_yn("Include Risky Images (CVE layer breakdown)", default=True)
+    config["include_risks"] = _prompt_yn("Include Cloud Risks", default=True)
+
+    _include_ioms = _prompt_yn("Include Cloud Service IOMs", default=False)
     print()
+
+    if config["include_ioas"]:
+        print(f"  {T_BOLD}{T_HEADER}▸ Cloud IOA Filters{T_RESET}")
+        print(f"  {T_HINT}Available severities: {', '.join(VALID_SEVERITIES)}, all{T_RESET}")
+        ioa_sev_raw = _prompt("IOA severity (comma-separated, or all)", "all")
+        if not ioa_sev_raw.strip() or ioa_sev_raw.strip().lower() == "all":
+            config["ioa_severities"] = []
+        else:
+            sevs = [s.strip().capitalize() for s in ioa_sev_raw.split(",") if s.strip()]
+            config["ioa_severities"] = [s for s in sevs if s in VALID_SEVERITIES]
+        print()
 
     if config["include_risks"]:
         print(f"  {T_BOLD}{T_HEADER}▸ Risk Filters{T_RESET}")
@@ -235,30 +246,45 @@ def interactive_config():
 
         print(f"  {T_HINT}Available providers: {', '.join(VALID_PROVIDERS)}, all{T_RESET}")
         prov_raw = _prompt("Cloud provider", "all")
-        prov = prov_raw.strip().lower()
-        config["risk_provider"] = prov if prov in VALID_PROVIDERS else "all"
+        config["risk_provider"] = prov_raw.strip().lower() if prov_raw.strip().lower() in VALID_PROVIDERS else "all"
         print()
 
-    if config["include_ioas"]:
-        print(f"  {T_BOLD}{T_HEADER}▸ Cloud IOA Filters{T_RESET}")
-        print(f"  {T_HINT}Available severities: {', '.join(VALID_SEVERITIES)}, all{T_RESET}")
-        ioa_sev_raw = _prompt("IOA severity (comma-separated, or all)", "all")
-        if not ioa_sev_raw.strip() or ioa_sev_raw.strip().lower() == "all":
-            config["ioa_severities"] = []
+    if _include_ioms:
+        print(f"  {T_BOLD}{T_HEADER}▸ Cloud IOM Filters{T_RESET}")
+        print(f"  {T_HINT}Available categories: {', '.join(VALID_IOM_CATEGORIES)}{T_RESET}")
+        iom_raw = _prompt("IOM categories (comma-separated, or all)", "all")
+        iom_val = iom_raw.strip().lower()
+        if not iom_val or iom_val == "all":
+            config["iom_categories"] = ["all"]
         else:
-            sevs = [s.strip().capitalize() for s in ioa_sev_raw.split(",") if s.strip()]
-            config["ioa_severities"] = [s for s in sevs if s in VALID_SEVERITIES]
-        print()
+            cats = [c.strip() for c in iom_val.split(",") if c.strip()]
+            config["iom_categories"] = [c for c in cats if c in IOM_CATEGORIES] or ["all"]
 
-    if config["include_ai_packages"]:
-        print(f"  {T_BOLD}{T_HEADER}▸ AI Package Filters{T_RESET}")
         print(f"  {T_HINT}Available severities: {', '.join(VALID_SEVERITIES)}, all{T_RESET}")
-        ai_sev_raw = _prompt("Package severity (comma-separated, or all)", "Critical")
-        if not ai_sev_raw.strip() or ai_sev_raw.strip().lower() == "all":
-            config["ai_package_severities"] = []
+        iom_sev_raw = _prompt("IOM severity (comma-separated, or all)", "all")
+        if not iom_sev_raw.strip() or iom_sev_raw.strip().lower() == "all":
+            config["iom_severities"] = []
         else:
-            sevs = [s.strip().capitalize() for s in ai_sev_raw.split(",") if s.strip()]
-            config["ai_package_severities"] = [s for s in sevs if s in VALID_SEVERITIES] or ["Critical"]
+            sevs = [s.strip().capitalize() for s in iom_sev_raw.split(",") if s.strip()]
+            config["iom_severities"] = [s for s in sevs if s in VALID_SEVERITIES]
+        print()
+    else:
+        config["iom_categories"] = []
+        config["iom_severities"] = []
+
+    # ── Section 2: Cloud Apps ─────────────────────────────────────────────────
+    print(f"  {T_BOLD}{T_HEADER}▸ Section 2 — Cloud Apps{T_RESET}")
+    config["include_cloud_apps"]   = _prompt_yn("Include Cloud Applications", default=True)
+    config["include_risky_images"] = _prompt_yn("Include Risky Container Images", default=True)
+    print()
+
+    if config["include_cloud_apps"]:
+        print(f"  {T_BOLD}{T_HEADER}▸ Cloud Applications Filters{T_RESET}")
+        ca_max_raw = _prompt("Max applications to include", "50")
+        try:
+            config["cloud_apps_max"] = max(1, int(ca_max_raw.strip()))
+        except (ValueError, TypeError):
+            config["cloud_apps_max"] = 50
         print()
 
     if config["include_risky_images"]:
@@ -277,6 +303,39 @@ def interactive_config():
             config["risky_images_max"] = 10
         print()
 
+    # ── Section 3: Shadow AI ──────────────────────────────────────────────────
+    print(f"  {T_BOLD}{T_HEADER}▸ Section 3 — Shadow AI{T_RESET}")
+    config["include_ai_services"]  = _prompt_yn("Include AI Services (cloud IOMs — AI category)", default=True)
+    config["include_ai_packages"]  = _prompt_yn("Include AI Package Risks", default=True)
+    print()
+
+    if config["include_ai_services"]:
+        print(f"  {T_BOLD}{T_HEADER}▸ AI Services Filters{T_RESET}")
+        print(f"  {T_HINT}Available severities: {', '.join(VALID_SEVERITIES)}, all{T_RESET}")
+        ai_svc_sev_raw = _prompt("AI Services severity (comma-separated, or all)", "all")
+        if not ai_svc_sev_raw.strip() or ai_svc_sev_raw.strip().lower() == "all":
+            config["ai_services_severities"] = []
+        else:
+            sevs = [s.strip().capitalize() for s in ai_svc_sev_raw.split(",") if s.strip()]
+            config["ai_services_severities"] = [s for s in sevs if s in VALID_SEVERITIES]
+        print()
+
+    if config["include_ai_packages"]:
+        print(f"  {T_BOLD}{T_HEADER}▸ AI Package Filters{T_RESET}")
+        print(f"  {T_HINT}Available severities: {', '.join(VALID_SEVERITIES)}, all{T_RESET}")
+        ai_sev_raw = _prompt("Package severity (comma-separated, or all)", "Critical")
+        if not ai_sev_raw.strip() or ai_sev_raw.strip().lower() == "all":
+            config["ai_package_severities"] = []
+        else:
+            sevs = [s.strip().capitalize() for s in ai_sev_raw.split(",") if s.strip()]
+            config["ai_package_severities"] = [s for s in sevs if s in VALID_SEVERITIES] or ["Critical"]
+        print()
+
+    # ── Section 4: Unmanaged VMs ──────────────────────────────────────────────
+    print(f"  {T_BOLD}{T_HEADER}▸ Section 4 — Unmanaged VMs{T_RESET}")
+    config["include_vms"] = _prompt_yn("Include Unmanaged Virtual Machines", default=True)
+    print()
+
     if config["include_vms"]:
         print(f"  {T_BOLD}{T_HEADER}▸ VM Filters{T_RESET}")
         print(f"  {T_HINT}Available providers: AWS, Azure, GCP{T_RESET}")
@@ -286,30 +345,7 @@ def interactive_config():
         config["vm_providers"] = [_norm[p.lower()] for p in vm_provs if p.lower() in _norm] or ["AWS", "Azure", "GCP"]
         print()
 
-    print(f"  {T_BOLD}{T_HEADER}▸ IOM / Misconfiguration Filters{T_RESET}")
-    _cat_list = ", ".join(VALID_IOM_CATEGORIES)
-    print(f"  {T_HINT}Available categories: {_cat_list}{T_RESET}")
-    print(f"  {T_HINT}Enter 'none' or leave blank to skip the IOM section.{T_RESET}")
-    iom_raw = _prompt("IOM categories (comma-separated, all, or none)", "none")
-    iom_val = iom_raw.strip().lower()
-    if not iom_val or iom_val == "none":
-        config["iom_categories"] = []
-    elif iom_val == "all":
-        config["iom_categories"] = ["all"]
-    else:
-        cats = [c.strip() for c in iom_val.split(",") if c.strip()]
-        config["iom_categories"] = [c for c in cats if c in IOM_CATEGORIES] or []
-
-    if config["iom_categories"]:
-        print(f"  {T_HINT}Available severities: {', '.join(VALID_SEVERITIES)}{T_RESET}")
-        iom_sev_raw = _prompt("IOM severity filter (comma-separated, or all)", "all")
-        if not iom_sev_raw.strip() or iom_sev_raw.strip().lower() == "all":
-            config["iom_severities"] = []
-        else:
-            sevs = [s.strip().capitalize() for s in iom_sev_raw.split(",") if s.strip()]
-            config["iom_severities"] = [s for s in sevs if s in VALID_SEVERITIES]
-    print()
-
+    # ── Output ────────────────────────────────────────────────────────────────
     print(f"  {T_BOLD}{T_HEADER}▸ Output{T_RESET}")
     config["output_file"] = ensure_timestamped_filename(_prompt("Output filename", OUTPUT_FILE))
     print()
@@ -330,11 +366,15 @@ def _default_config():
         "include_vms":            True,
         "include_ai_packages":    False,
         "include_risky_images":   False,
+        "include_cloud_apps":     False,
+        "include_ai_services":    False,
         "iom_categories":         [],
         "iom_severities":         [],
         "ai_package_severities":  ["Critical"],
         "risky_images_severities": ["Critical"],
         "risky_images_max":       10,
+        "cloud_apps_max":         50,
+        "ai_services_severities": [],
         "severities":             ["High"],
         "status":                 "Open",
         "risk_provider":          "all",
@@ -360,7 +400,8 @@ def _default_config():
 def _sanitize_saved_config(cfg):
     """Normalize and drop invalid values from a loaded .report_defaults.json."""
     out = {}
-    bool_keys = ("include_risks", "include_ioas", "include_vms", "include_ai_packages", "include_risky_images")
+    bool_keys = ("include_risks", "include_ioas", "include_vms", "include_ai_packages",
+                 "include_risky_images", "include_cloud_apps", "include_ai_services")
     for k in bool_keys:
         if k in cfg:
             out[k] = bool(cfg[k])
@@ -392,6 +433,13 @@ def _sanitize_saved_config(cfg):
             out["risky_images_max"] = max(1, int(cfg["risky_images_max"]))
         except (TypeError, ValueError):
             pass
+    if "cloud_apps_max" in cfg:
+        try:
+            out["cloud_apps_max"] = max(1, int(cfg["cloud_apps_max"]))
+        except (TypeError, ValueError):
+            pass
+    if "ai_services_severities" in cfg:
+        out["ai_services_severities"] = [s for s in cfg["ai_services_severities"] if s in VALID_SEVERITIES]
     valid_vm = {"AWS", "Azure", "GCP"}
     if "vm_providers" in cfg:
         out["vm_providers"] = [p for p in cfg["vm_providers"] if p in valid_vm] or ["AWS", "Azure", "GCP"]
@@ -811,6 +859,59 @@ def fetch_risky_images(ci, cv, severities=None, max_images=10):
     results.sort(key=lambda x: x.get("vulnerability_count", 0), reverse=True)
     return results
 
+
+def fetch_cloud_apps(csa, limit=50):
+    """Fetch ASPM cloud applications via CloudSecurityAssets.
+
+    Returns list of dicts sorted by total vulnerabilities desc.
+    """
+    ids = []
+    after = None
+    while len(ids) < limit:
+        params = {"filter": "resource_type_name:'Application'", "limit": min(500, limit - len(ids))}
+        if after:
+            params["after"] = after
+        r = csa.query_assets(**params)
+        if r["status_code"] != 200:
+            dbg_response("query_assets (cloud apps)", r)
+            break
+        batch = r["body"].get("resources") or []
+        ids.extend(batch)
+        after = r["body"].get("meta", {}).get("pagination", {}).get("after")
+        if not batch or not after:
+            break
+
+    apps = []
+    for i in range(0, len(ids), 100):
+        r = csa.get_assets(ids=ids[i:i + 100])
+        if r["status_code"] != 200:
+            dbg_response("get_assets (cloud apps)", r)
+            continue
+        for res in r["body"].get("resources") or []:
+            cfg_raw = res.get("configuration") or "{}"
+            cfg = json.loads(cfg_raw) if isinstance(cfg_raw, str) else (cfg_raw or {})
+            deploy  = cfg.get("deployment") or {}
+            summary = cfg.get("summary") or {}
+            exprt   = summary.get("reachableVulnerabilitiesExprtRating") or {}
+            techs   = cfg.get("technologies") or []
+            k8s     = deploy.get("kubernetesDeployment") or {}
+            apps.append({
+                "name":             res.get("resource_name") or res.get("resource_id", ""),
+                "account_id":       res.get("account_id", ""),
+                "region":           res.get("region", ""),
+                "deployment_type":  deploy.get("deploymentType", ""),
+                "deployment_provider": deploy.get("deploymentProvider", ""),
+                "k8s_namespace":    k8s.get("namespace", ""),
+                "k8s_deployment":   k8s.get("deploymentName", ""),
+                "technologies":     techs,
+                "total_vulns":      summary.get("vulnerabilities", 0),
+                "exprt":            exprt,
+            })
+
+    apps.sort(key=lambda x: x["total_vulns"], reverse=True)
+    return apps
+
+
 def fetch_ioms(csd, categories, severities=None):
     """Fetch non-compliant IOM entities for the given category list.
 
@@ -1055,6 +1156,36 @@ def print_risky_images(images):
                       f"{exploit}{fix}")
         if img.get("falcon_url"):
             print(f"\n    {t_label('Falcon:    ')} {T_HINT}{img['falcon_url'][:100]}{T_RESET}")
+        print(f"\n  {T_MUTED}{'─' * 62}{T_RESET}")
+    print()
+
+
+def print_cloud_apps(apps):
+    _banner("CLOUD APPLICATIONS", len(apps))
+
+    if not apps:
+        print(f"\n  {T_WARN}No cloud applications found.{T_RESET}\n")
+        return
+
+    for i, app in enumerate(apps, 1):
+        techs = ", ".join(app["technologies"]) if app["technologies"] else "N/A"
+        exprt = app["exprt"]
+        exprt_parts = []
+        for sev in ("critical", "high", "medium", "low"):
+            v = exprt.get(sev, 0)
+            if v:
+                exprt_parts.append(f"{v} {sev.capitalize()}")
+        exprt_str = "  |  ".join(exprt_parts) if exprt_parts else "None"
+
+        print(f"\n  {T_BOLD}{T_VALUE}[{i} of {len(apps)}]  {app['name']}{T_RESET}")
+        print(f"  {t_label('Deployment:   ')} {T_VALUE}{app['deployment_type']}{T_RESET}")
+        print(f"  {t_label('Technologies: ')} {T_VALUE}{techs}{T_RESET}")
+        if app["k8s_namespace"]:
+            print(f"  {t_label('Namespace:    ')} {T_MUTED}{app['k8s_namespace']}{T_RESET}")
+        print(f"  {t_label('Account:      ')} {T_VALUE}{app['account_id']}{T_RESET}")
+        print(f"  {t_label('Region:       ')} {T_VALUE}{app['region']}{T_RESET}")
+        print(f"  {t_label('Vulns:        ')} {T_BOLD}{T_CRITICAL if app['total_vulns'] else T_MUTED}{app['total_vulns']}{T_RESET}")
+        print(f"  {t_label('ExPRT:        ')} {T_WARN}{exprt_str}{T_RESET}")
         print(f"\n  {T_MUTED}{'─' * 62}{T_RESET}")
     print()
 
@@ -1391,7 +1522,7 @@ class FalconReport(FPDF):
     LABEL_W = 34
 
     def header(self):
-        if self.page_no() == 1:
+        if self.page_no() <= 2:  # Skip cover (1) and TOC (2)
             return
         self.set_fill_color(*DARK)
         self.rect(0, 0, 210, 20, "F")
@@ -1411,7 +1542,8 @@ class FalconReport(FPDF):
 
     def cover(self, risks_count=None, ioas_count=None, vm_totals=None,
               ai_packages_count=None, ioms_count=None, ioms_label="",
-              risky_images_count=None, filter_desc=""):
+              risky_images_count=None, cloud_apps_count=None,
+              ai_services_count=None, filter_desc=""):
         self.set_fill_color(*DARK)
         self.rect(0, 0, 210, 297, "F")
         self.set_y(80)
@@ -1480,6 +1612,20 @@ class FalconReport(FPDF):
                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             self.ln(2)
 
+        if cloud_apps_count is not None:
+            self.set_font("Helvetica", "B", 10)
+            self.set_text_color(*LIGHT_GRAY)
+            self.cell(0, 8, f"Cloud Applications:  {cloud_apps_count}", align="C",
+                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.ln(2)
+
+        if ai_services_count is not None:
+            self.set_font("Helvetica", "B", 10)
+            self.set_text_color(*LIGHT_GRAY)
+            self.cell(0, 8, f"AI Services (IOMs):  {ai_services_count}", align="C",
+                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.ln(2)
+
         if filter_desc:
             self.ln(6)
             self.set_font("Helvetica", "", 8)
@@ -1504,6 +1650,17 @@ class FalconReport(FPDF):
         self.cell(self.epw, 12, sanitize(f"  {title}"),
                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         self.ln(3)
+
+    def section_group_header(self, label):
+        """Full-width amber banner dividing the 4 report groups."""
+        self.set_fill_color(*AMBER)
+        self.rect(self.l_margin, self.get_y(), self.epw, 14, "F")
+        self.set_font("Helvetica", "B", 13)
+        self.set_text_color(*WHITE)
+        self.set_x(self.l_margin)
+        self.cell(self.epw, 14, sanitize(f"  {label}"),
+                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        self.ln(4)
 
     def sub_header(self, title):
         if self.get_y() > self.h - self.b_margin - 20:
@@ -1904,6 +2061,46 @@ class FalconReport(FPDF):
         self._separator()
 
 
+    def cloud_app_card(self, i, total, app):
+        if self.get_y() > self.h - self.b_margin - 60:
+            self.add_page()
+
+        # Card header
+        self.set_fill_color(*DARK)
+        self.rect(self.l_margin, self.get_y(), self.epw, 10, "F")
+        self.set_font("Helvetica", "B", 9)
+        self.set_text_color(*WHITE)
+        self.set_x(self.l_margin)
+        self.cell(self.epw, 10, sanitize(f"  [{i} of {total}]  {app['name']}"),
+                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        self.ln(1)
+
+        techs = ", ".join(app["technologies"]) if app["technologies"] else "N/A"
+        exprt = app["exprt"]
+        exprt_parts = []
+        for sev in ("critical", "high", "medium", "low"):
+            v = exprt.get(sev, 0)
+            if v:
+                exprt_parts.append(f"{v} {sev.capitalize()}")
+        exprt_str = "  /  ".join(exprt_parts) if exprt_parts else "None"
+
+        fields = [
+            ("Deployment Type",  app.get("deployment_type") or "N/A"),
+            ("Technologies",     techs),
+            ("Account",          app.get("account_id") or "N/A"),
+            ("Region",           app.get("region") or "N/A"),
+            ("Vulnerabilities",  app.get("total_vulns", 0)),
+            ("ExPRT Ratings",    exprt_str),
+        ]
+        if app.get("k8s_namespace"):
+            fields.insert(2, ("K8s Namespace", app["k8s_namespace"]))
+
+        for idx, (field, value) in enumerate(fields):
+            self.row(field, value, alt=idx % 2 == 0)
+
+        self._separator()
+
+
     def ai_iom_card(self, i, total, iom):
         if self.get_y() > self.h - self.b_margin - 80:
             self.add_page()
@@ -1965,7 +2162,7 @@ class FalconReport(FPDF):
         self._separator()
 
 
-def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, config):
+def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, cloud_apps, ai_services, config):
     output_file = ensure_timestamped_filename(config.get("output_file", OUTPUT_FILE))
     vm_totals = {provider: len(assets) for provider, assets in vm_data.items()}
     iom_cats = config.get("iom_categories", [])
@@ -1981,45 +2178,46 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, config):
 
     pdf.add_page()
     pdf.cover(
-        risks_count=len(risks)             if config.get("include_risks")         else None,
-        ioas_count=len(ioas)               if config.get("include_ioas")          else None,
-        vm_totals=vm_totals                if config.get("include_vms")           else None,
-        ai_packages_count=len(ai_packages) if config.get("include_ai_packages")   else None,
-        ioms_count=len(ioms)               if iom_cats                            else None,
-        ioms_label=ioms_label              if iom_cats                            else "",
-        risky_images_count=len(risky_images) if config.get("include_risky_images") else None,
+        risks_count=len(risks)               if config.get("include_risks")         else None,
+        ioas_count=len(ioas)                 if config.get("include_ioas")          else None,
+        vm_totals=vm_totals                  if config.get("include_vms")           else None,
+        ai_packages_count=len(ai_packages)   if config.get("include_ai_packages")   else None,
+        ioms_count=len(ioms)                 if iom_cats                            else None,
+        ioms_label=ioms_label                if iom_cats                            else "",
+        risky_images_count=len(risky_images) if config.get("include_risky_images")  else None,
+        cloud_apps_count=len(cloud_apps)     if config.get("include_cloud_apps")    else None,
+        ai_services_count=len(ai_services)   if config.get("include_ai_services")   else None,
         filter_desc=fdesc,
     )
 
-    # TOC placeholder on page 2; insert_toc_placeholder advances to page 3
+    # TOC on page 2; insert_toc_placeholder advances to page 3
     pdf.add_page()
     pdf.insert_toc_placeholder(_render_toc, pages=1)
 
-    # Helper: first content section reuses page 3 (already advanced by insert_toc_placeholder);
-    # subsequent sections each start a new page.
     _first_section = [True]
 
-    def _begin_section(title):
+    def _begin_section(title, group_label=None):
         if _first_section[0]:
             _first_section[0] = False
+            if group_label:
+                pdf.section_group_header(group_label)
         else:
             pdf.add_page()
+            if group_label:
+                pdf.section_group_header(group_label)
         pdf.start_section(title)
 
-    if config.get("include_risks"):
-        _begin_section(f"Cloud Risks  ({len(risks)} total)")
-        pdf.section_header(f"Cloud Risks  ({len(risks)} total)")
-        if not risks:
-            pdf.set_font("Helvetica", "", 9)
-            pdf.set_text_color(*MID_GRAY)
-            pdf.cell(0, 8, "  No risks found matching the filter.",
-                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-        else:
-            for i, risk in enumerate(risks, 1):
-                pdf.risk_card(i, len(risks), risk)
+    # ── Section 1: Cloud Infra ────────────────────────────────────────────────
+    _infra_group = "Section 1  —  Cloud Infra"
+    _infra_first = [True]
+
+    def _infra_section(title):
+        group = _infra_group if _infra_first[0] else None
+        _infra_first[0] = False
+        _begin_section(title, group_label=group)
 
     if config.get("include_ioas"):
-        _begin_section(f"Cloud IOA Detections  ({len(ioas)} total)")
+        _infra_section(f"Cloud IOA Detections  ({len(ioas)} total)")
         pdf.section_header(f"Cloud IOA Detections  ({len(ioas)} total)")
         if not ioas:
             pdf.set_font("Helvetica", "", 9)
@@ -2030,8 +2228,86 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, config):
             for i, ioa in enumerate(ioas, 1):
                 pdf.ioa_card(i, len(ioas), ioa)
 
+    if config.get("include_risks"):
+        _infra_section(f"Cloud Risks  ({len(risks)} total)")
+        pdf.section_header(f"Cloud Risks  ({len(risks)} total)")
+        if not risks:
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(*MID_GRAY)
+            pdf.cell(0, 8, "  No risks found matching the filter.",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        else:
+            for i, risk in enumerate(risks, 1):
+                pdf.risk_card(i, len(risks), risk)
+
+    if iom_cats:
+        _infra_section(f"Cloud Service IOMs  ({len(ioms)} total)")
+        pdf.section_header(f"Cloud Service IOMs  ({len(ioms)} total)  -  {ioms_label}")
+        if not ioms:
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(*MID_GRAY)
+            pdf.cell(0, 8, "  No active misconfigurations found for the selected categories.",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        else:
+            for i, iom in enumerate(ioms, 1):
+                pdf.ai_iom_card(i, len(ioms), iom)
+
+    # ── Section 2: Cloud Apps ─────────────────────────────────────────────────
+    _apps_group = "Section 2  —  Cloud Apps"
+    _apps_first = [True]
+
+    def _apps_section(title):
+        group = _apps_group if _apps_first[0] else None
+        _apps_first[0] = False
+        _begin_section(title, group_label=group)
+
+    if config.get("include_cloud_apps"):
+        _apps_section(f"Cloud Applications  ({len(cloud_apps)} total)")
+        pdf.section_header(f"Cloud Applications  ({len(cloud_apps)} total)")
+        if not cloud_apps:
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(*MID_GRAY)
+            pdf.cell(0, 8, "  No cloud applications found.",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        else:
+            for i, app in enumerate(cloud_apps, 1):
+                pdf.cloud_app_card(i, len(cloud_apps), app)
+
+    if config.get("include_risky_images"):
+        _apps_section(f"Risky Container Images  ({len(risky_images)} total)")
+        pdf.section_header(f"Risky Container Images  ({len(risky_images)} total)")
+        if not risky_images:
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(*MID_GRAY)
+            pdf.cell(0, 8, "  No images with matching CVEs found.",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        else:
+            for i, img in enumerate(risky_images, 1):
+                pdf.risky_image_card(i, len(risky_images), img)
+
+    # ── Section 3: Shadow AI ──────────────────────────────────────────────────
+    _ai_group = "Section 3  —  Shadow AI"
+    _ai_first = [True]
+
+    def _ai_section(title):
+        group = _ai_group if _ai_first[0] else None
+        _ai_first[0] = False
+        _begin_section(title, group_label=group)
+
+    if config.get("include_ai_services"):
+        _ai_section(f"AI Services — IOMs  ({len(ai_services)} total)")
+        pdf.section_header(f"AI Services -- IOMs  ({len(ai_services)} total)")
+        if not ai_services:
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(*MID_GRAY)
+            pdf.cell(0, 8, "  No AI service misconfigurations found.",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        else:
+            for i, iom in enumerate(ai_services, 1):
+                pdf.ai_iom_card(i, len(ai_services), iom)
+
     if config.get("include_ai_packages"):
-        _begin_section(f"AI Package Risks — Critical CVEs  ({len(ai_packages)} packages)")
+        _ai_section(f"AI Package Risks  ({len(ai_packages)} packages)")
         pdf.section_header(f"AI Package Risks -- Critical CVEs  ({len(ai_packages)} packages)")
         if not ai_packages:
             pdf.set_font("Helvetica", "", 9)
@@ -2042,34 +2318,11 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, config):
             for i, pkg in enumerate(ai_packages, 1):
                 pdf.ai_package_card(i, len(ai_packages), pkg)
 
-    if iom_cats:
-        _begin_section(f"Cloud Service IOMs  ({len(ioms)} total)")
-        section_title = f"Cloud Service IOMs  ({len(ioms)} total)  -  {ioms_label}"
-        pdf.section_header(section_title)
-        if not ioms:
-            pdf.set_font("Helvetica", "", 9)
-            pdf.set_text_color(*MID_GRAY)
-            pdf.cell(0, 8, "  No active misconfigurations found for the selected categories.",
-                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-        else:
-            for i, iom in enumerate(ioms, 1):
-                pdf.ai_iom_card(i, len(ioms), iom)
-
-    if config.get("include_risky_images"):
-        _begin_section(f"Risky Images  ({len(risky_images)} total)")
-        pdf.section_header(f"Risky Images  ({len(risky_images)} total)")
-        if not risky_images:
-            pdf.set_font("Helvetica", "", 9)
-            pdf.set_text_color(*MID_GRAY)
-            pdf.cell(0, 8, "  No images with matching CVEs found.",
-                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-        else:
-            for i, img in enumerate(risky_images, 1):
-                pdf.risky_image_card(i, len(risky_images), img)
-
+    # ── Section 4: Unmanaged VMs ──────────────────────────────────────────────
     if config.get("include_vms"):
         total_vms = sum(vm_totals.values())
-        _begin_section(f"Unmanaged Virtual Machines  ({total_vms} total)")
+        _begin_section(f"Unmanaged Virtual Machines  ({total_vms} total)",
+                       group_label="Section 4  —  Unmanaged VMs")
         pdf.section_header(f"Unmanaged Virtual Machines  ({total_vms} total)")
         for provider, assets in vm_data.items():
             pdf.sub_header(f"{provider}  -  {len(assets)} asset(s)")
@@ -2157,6 +2410,13 @@ if __name__ == "__main__":
         risky_images = fetch_risky_images(ci, cv, ri_sevs, ri_max)
         print(f"{T_SUCCESS}  ✓ {len(risky_images)} risky image(s) found.{T_RESET}")
 
+    cloud_apps = []
+    if config.get("include_cloud_apps"):
+        ca_max = config.get("cloud_apps_max", 50)
+        print(f"{T_HINT}  Fetching cloud applications  {T_MUTED}(up to {ca_max}){T_RESET}")
+        cloud_apps = fetch_cloud_apps(csa, ca_max)
+        print(f"{T_SUCCESS}  ✓ {len(cloud_apps)} cloud application(s) found.{T_RESET}")
+
     ioms = []
     iom_cats = config.get("iom_categories", [])
     if iom_cats:
@@ -2167,19 +2427,31 @@ if __name__ == "__main__":
         ioms = fetch_ioms(csd, iom_cats, iom_sevs)
         print(f"{T_SUCCESS}  ✓ {len(ioms)} misconfiguration(s) found.{T_RESET}")
 
+    ai_services = []
+    if config.get("include_ai_services"):
+        ai_svc_sevs = config.get("ai_services_severities", [])
+        sev_label = ", ".join(ai_svc_sevs) if ai_svc_sevs else "all severities"
+        print(f"{T_HINT}  Fetching AI services IOMs  {T_MUTED}({sev_label}){T_RESET}")
+        ai_services = fetch_ioms(csd, ["ai"], ai_svc_sevs)
+        print(f"{T_SUCCESS}  ✓ {len(ai_services)} AI service misconfiguration(s) found.{T_RESET}")
+
     print()
-    if config["include_risks"]:
-        print_risks(risks)
     if config["include_ioas"]:
         print_cloud_ioas(ioas)
-    if config["include_vms"]:
-        print_vms(vm_data)
-    if config["include_ai_packages"]:
-        print_ai_packages(ai_packages)
-    if config.get("include_risky_images"):
-        print_risky_images(risky_images)
+    if config["include_risks"]:
+        print_risks(risks)
     if iom_cats:
         print_ai_ioms(ioms)
+    if config.get("include_cloud_apps"):
+        print_cloud_apps(cloud_apps)
+    if config.get("include_risky_images"):
+        print_risky_images(risky_images)
+    if config.get("include_ai_services"):
+        print_ai_ioms(ai_services)
+    if config["include_ai_packages"]:
+        print_ai_packages(ai_packages)
+    if config["include_vms"]:
+        print_vms(vm_data)
 
     print(f"\n{T_HINT}  Building PDF...{T_RESET}")
-    build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, config)
+    build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, cloud_apps, ai_services, config)

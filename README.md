@@ -1,23 +1,21 @@
 # Falcon Cloud Risk Report
 
-> Automated PDF report combining open cloud risks, Cloud IOA detections, AI package CVEs, cloud service misconfigurations, and unmanaged running VMs from [CrowdStrike Falcon Cloud Security](https://www.crowdstrike.com/platform/cloud-security/) using the [FalconPy SDK](https://github.com/CrowdStrike/falconpy).
+> Automated PDF report combining cloud risks, IOA detections, cloud applications, AI package CVEs, cloud service misconfigurations, and unmanaged running VMs from [CrowdStrike Falcon Cloud Security](https://www.crowdstrike.com/platform/cloud-security/) using the [FalconPy SDK](https://github.com/CrowdStrike/falconpy).
 
 ---
 
 ## What It Produces
 
-A single PDF with a cover page, a clickable table of contents, and up to five content sections — each togglable at runtime:
+A single PDF with a cover page, a clickable table of contents, and four logical sections — each togglable at runtime:
 
-| Page | Content |
+| Section | Subsections |
 |---|---|
 | **Cover** | Section counts, active filter summary, and generation timestamp |
-| **Table of Contents** | Clickable page-linked index of every included section |
-| **Cloud Risks** | Rule name, description, asset, account, region, and risk factors with remediation steps |
-| **Cloud IOA Detections** | Event name, description, severity, MITRE tactic/technique, user, region, and timestamp |
-| **AI Package Risks** | AI-related container packages with CVEs — CVE ID, description, fix version, and affected image names |
-| **Cloud Service IOMs** | Active misconfigurations filtered by service category and severity, with remediation steps, cloud console deep-links, and Falcon links |
-| **Risky Images** | Container images with CVEs — per-image layer breakdown showing which `RUN` layer introduced each CVE, CVSS score, package, exploit/fix flags, and a Falcon console deep-link |
-| **Unmanaged Running VMs** | Table of unmanaged, running VMs scoped to your selected cloud providers |
+| **Table of Contents** | Clickable page-linked index of every included subsection |
+| **1 — Cloud Infra** | **Cloud IOA Detections** · Event name, severity, MITRE tactic/technique, user, region, timestamp<br>**Cloud Risks** · Rule name, description, asset, account, region, risk factors, remediation<br>**Cloud Service IOMs** · Active misconfigurations with remediation steps, cloud console deep-links, and Falcon links |
+| **2 — Cloud Apps** | **Cloud Applications** · App name, deployment type, technologies, account, region, vulnerability count, ExPRT ratings<br>**Risky Container Images** · Per-image CVE layer breakdown — layer command, CVE ID, CVSS, package, exploit/fix flags, Falcon deep-link |
+| **3 — Shadow AI** | **AI Services** · IOMs scoped to AI cloud services (SageMaker, Bedrock, Vertex AI, etc.)<br>**AI Package Risks** · AI-related container packages with CVEs — CVE ID, description, fix version, affected images |
+| **4 — Unmanaged VMs** | **Unmanaged Virtual Machines** · Table of unmanaged, running VMs scoped to selected cloud providers |
 
 ---
 
@@ -99,7 +97,7 @@ python cloud_risks_report_pdf.py -i -d
 
 ## Interactive Mode
 
-Pass `-i` or `--interactive` to configure the report before any API calls are made. You will be stepped through each section — press **Enter** to accept the default shown in `[ ]`.
+Pass `-i` or `--interactive` to configure the report before any API calls are made. You will be stepped through each of the four sections — press **Enter** to accept the default shown in `[ ]`.
 
 > The IOM severity prompt only appears when at least one category is selected.
 
@@ -117,7 +115,7 @@ Running without `-i` uses these defaults (or saved defaults from `.report_defaul
 
 | Setting | Default value |
 |---|---|
-| Sections | Risks, IOAs, VMs included; AI Packages, Risky Images, and IOMs excluded |
+| Sections | Cloud IOAs, Risks, VMs included; Cloud IOMs, Cloud Apps, Risky Images, AI Services, AI Packages excluded |
 | Risk severity | High |
 | Risk status | Open |
 | Risk cloud provider | all |
