@@ -218,7 +218,7 @@ def interactive_config():
     config["include_ioas"]  = _prompt_yn("Include Cloud IOA Detections", default=True)
     config["include_vms"]   = _prompt_yn("Include Unmanaged Virtual Machines", default=True)
     config["include_ai_packages"] = _prompt_yn("Include AI Package Risks (Critical CVEs)", default=True)
-    config["include_risky_images"] = _prompt_yn("Include Risky Images (CVE layer breakdown)", default=False)
+    config["include_risky_images"] = _prompt_yn("Include Risky Images (CVE layer breakdown)", default=True)
     print()
 
     if config["include_risks"]:
