@@ -218,15 +218,7 @@ def interactive_config():
     config["include_ioas"]  = _prompt_yn("Include Cloud IOA Detections", default=True)
     config["include_risks"] = _prompt_yn("Include Cloud Risks", default=True)
 
-    iom_raw = _prompt("Include Cloud IOMs  (categories: all, none, or comma-separated)", "none")
-    iom_val = iom_raw.strip().lower()
-    if not iom_val or iom_val == "none":
-        config["iom_categories"] = []
-    elif iom_val == "all":
-        config["iom_categories"] = ["all"]
-    else:
-        cats = [c.strip() for c in iom_val.split(",") if c.strip()]
-        config["iom_categories"] = [c for c in cats if c in IOM_CATEGORIES] or []
+    _include_ioms = _prompt_yn("Include Cloud Service IOMs", default=False)
     print()
 
     if config["include_ioas"]:
@@ -257,9 +249,17 @@ def interactive_config():
         config["risk_provider"] = prov_raw.strip().lower() if prov_raw.strip().lower() in VALID_PROVIDERS else "all"
         print()
 
-    if config["iom_categories"]:
+    if _include_ioms:
         print(f"  {T_BOLD}{T_HEADER}▸ Cloud IOM Filters{T_RESET}")
         print(f"  {T_HINT}Available categories: {', '.join(VALID_IOM_CATEGORIES)}{T_RESET}")
+        iom_raw = _prompt("IOM categories (comma-separated, or all)", "all")
+        iom_val = iom_raw.strip().lower()
+        if not iom_val or iom_val == "all":
+            config["iom_categories"] = ["all"]
+        else:
+            cats = [c.strip() for c in iom_val.split(",") if c.strip()]
+            config["iom_categories"] = [c for c in cats if c in IOM_CATEGORIES] or ["all"]
+
         print(f"  {T_HINT}Available severities: {', '.join(VALID_SEVERITIES)}, all{T_RESET}")
         iom_sev_raw = _prompt("IOM severity (comma-separated, or all)", "all")
         if not iom_sev_raw.strip() or iom_sev_raw.strip().lower() == "all":
@@ -268,6 +268,9 @@ def interactive_config():
             sevs = [s.strip().capitalize() for s in iom_sev_raw.split(",") if s.strip()]
             config["iom_severities"] = [s for s in sevs if s in VALID_SEVERITIES]
         print()
+    else:
+        config["iom_categories"] = []
+        config["iom_severities"] = []
 
     # ── Section 2: Cloud Apps ─────────────────────────────────────────────────
     print(f"  {T_BOLD}{T_HEADER}▸ Section 2 — Cloud Apps{T_RESET}")
@@ -1519,7 +1522,7 @@ class FalconReport(FPDF):
     LABEL_W = 34
 
     def header(self):
-        if self.page_no() == 1:
+        if self.page_no() <= 2:  # Skip cover (1) and TOC (2)
             return
         self.set_fill_color(*DARK)
         self.rect(0, 0, 210, 20, "F")
