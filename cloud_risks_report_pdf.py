@@ -213,8 +213,8 @@ def interactive_config():
 
     config = {}
 
-    # ── Section 1: Cloud Infra ────────────────────────────────────────────────
-    print(f"  {T_BOLD}{T_HEADER}▸ Section 1 — Cloud Infra{T_RESET}")
+    # ── Section 1: Cloud Infrastructure ─────────────────────────────────────────
+    print(f"  {T_BOLD}{T_HEADER}▸ Section 1 — Cloud Infrastructure{T_RESET}")
     config["include_ioas"]  = _prompt_yn("Include Cloud IOA Detections", default=True)
     config["include_risks"] = _prompt_yn("Include Cloud Risks", default=True)
 
@@ -1652,8 +1652,8 @@ class FalconReport(FPDF):
         self.ln(3)
 
     def section_group_header(self, label):
-        """Full-width amber banner dividing the 4 report groups."""
-        self.set_fill_color(*AMBER)
+        """Full-width grey banner dividing the 4 report groups."""
+        self.set_fill_color(*MID_GRAY)
         self.rect(self.l_margin, self.get_y(), self.epw, 14, "F")
         self.set_font("Helvetica", "B", 13)
         self.set_text_color(*WHITE)
@@ -2207,8 +2207,8 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, cloud_apps,
                 pdf.section_group_header(group_label)
         pdf.start_section(title)
 
-    # ── Section 1: Cloud Infra ────────────────────────────────────────────────
-    _infra_group = "Section 1  —  Cloud Infra"
+    # ── Section 1: Cloud Infrastructure ─────────────────────────────────────────
+    _infra_group = "Section 1  —  Cloud Infrastructure"
     _infra_first = [True]
 
     def _infra_section(title):
