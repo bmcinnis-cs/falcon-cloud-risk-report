@@ -1136,7 +1136,20 @@ def _render_toc(pdf, outline):
     pdf.set_draw_color(*CS_RED)
     pdf.set_line_width(0.5)
     pdf.line(pdf.l_margin, pdf.get_y(), pdf.l_margin + W, pdf.get_y())
-    pdf.ln(8)
+    pdf.ln(6)
+
+    # Column headers
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_text_color(*MID_GRAY)
+    pdf.set_x(pdf.l_margin + 3)
+    pdf.cell(W - 20, 7, "SECTION")
+    pdf.cell(20, 7, "PAGE", align="R", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    # Thin rule under column headers
+    pdf.set_draw_color(*LIGHT_GRAY)
+    pdf.set_line_width(0.3)
+    pdf.line(pdf.l_margin, pdf.get_y(), pdf.l_margin + W, pdf.get_y())
+    pdf.ln(4)
 
     for idx, section in enumerate(outline):
         link_id = pdf.add_link(page=section.page_number)
