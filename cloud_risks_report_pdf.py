@@ -571,27 +571,29 @@ def _image_label(img):
 
 
 def fetch_images_for_package(ci, package_name_version):
-    """Return a deduplicated list of image name strings containing this package."""
+    """Return a deduplicated list of image labels containing this package."""
     images = []
-    seen_digests = set()
-    after = None
+    seen_labels = set()
+    offset = 0
+    limit = 100
     while True:
-        params = {"filter": f"package_name_version:'{package_name_version}'", "limit": 100}
-        if after:
-            params["after"] = after
-        r = ci.ReadCombinedImagesExport(**params)
+        r = ci.ReadCombinedImagesExport(
+            filter=f"package_name_version:'{package_name_version}'",
+            limit=limit,
+            offset=offset,
+        )
         if r["status_code"] != 200:
             dbg_response("ReadCombinedImagesExport", r)
             break
         batch = r["body"].get("resources") or []
         for img in batch:
-            digest = img.get("image_digest") or img.get("image_id") or _image_label(img)
-            if digest not in seen_digests:
-                seen_digests.add(digest)
-                images.append(_image_label(img))
-        after = r["body"].get("meta", {}).get("pagination", {}).get("after")
-        if not batch or not after:
+            label = _image_label(img)
+            if label not in seen_labels:
+                seen_labels.add(label)
+                images.append(label)
+        if len(batch) < limit:
             break
+        offset += len(batch)
     return images
 
 
