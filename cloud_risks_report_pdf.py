@@ -33,7 +33,6 @@ def ensure_timestamped_filename(filename):
         return f"{base}_{timestamp}{ext}"
     return f"{filename}_{timestamp}.pdf"
 
-OUTPUT_FILE    = get_default_output_filename()
 OUTPUT_FILE    = "falcon_cloud_security_report.pdf"
 DEFAULTS_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".report_defaults.json")
 
