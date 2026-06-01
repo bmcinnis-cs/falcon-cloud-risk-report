@@ -623,7 +623,7 @@ def fetch_ioms(csd, categories, severities=None):
     after = None
     page_num = 0
     while True:
-        params = {"limit": 500, "filter": "extension_status:'Unresolved'"}
+        params = {"limit": 500, "filter": "extension_status:'Unresolved'+status:'non-compliant'"}
         if after:
             params["after"] = after
         r = csd.query_iom_entities(**params)
@@ -680,8 +680,6 @@ def fetch_ioms(csd, categories, severities=None):
     result = []
     for e in all_entities:
         eval_data = e.get("evaluation", {})
-        if eval_data.get("status") != "non-compliant":
-            continue
         eval_rule = eval_data.get("rule", {})
         cloud    = e.get("cloud", {})
         resource = e.get("resource", {})
