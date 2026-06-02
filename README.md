@@ -130,11 +130,11 @@ The **Cloud Service IOMs** section surfaces active Indicators of Misconfiguratio
 
 ### Categories
 
-| Category | Resource types covered |
+| Category | Example resource types covered |
 |---|---|
 | `compute` | EC2 instances, volumes, images, snapshots, EIPs, Auto Scaling, GCP Compute instances and disks |
 | `networking` | Security groups, VPCs, subnets, network ACLs, route tables, load balancers, GCP networks and firewalls |
-| `iam` | AWS IAM roles, users, policies, groups; GCP IAM |
+| `iam` | AWS IAM roles, GCP IAM, AZ Users |
 | `storage` | S3 buckets, GCP Storage, Artifact Registry |
 | `database` | RDS, Athena, Glue |
 | `containers` | ECR, EKS, ECS, GKE |
