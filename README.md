@@ -137,7 +137,7 @@ The **Cloud Service IOMs** section surfaces active Indicators of Misconfiguratio
 | `iam` | AWS IAM roles, users, policies, groups; GCP IAM |
 | `storage` | S3 buckets, GCP Storage, Artifact Registry |
 | `database` | RDS, Athena, Glue |
-| `containers` | ECR, EKS, ECS, GCP GKE |
+| `containers` | ECR, EKS, ECS, GKE |
 | `serverless` | Lambda, EventBridge, GCP Pub/Sub |
 | `ai` | SageMaker, Bedrock, GCP Vertex AI, Azure Machine Learning, Azure Cognitive Services |
 | `secrets` | KMS, Secrets Manager, GCP Secret Manager |
