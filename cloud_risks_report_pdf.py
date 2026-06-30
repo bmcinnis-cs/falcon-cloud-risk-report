@@ -1193,6 +1193,7 @@ def fetch_new_assets(csa, lookback_days=7):
                 "account_id":    res.get("account_id", ""),
                 "region":        res.get("region", ""),
                 "first_seen":    res.get("first_seen", ""),
+                "gcrn":          res.get("id", ""),
             })
 
     assets.sort(key=lambda x: x["first_seen"], reverse=True)
@@ -1648,6 +1649,19 @@ def _falcon_iom_url(iom):
         f"/{encoded_id}/summary"
         f"?filter={encoded_filter}&summaryTab=1&view=iom"
     )
+
+
+def _fcs_asset_url(gcrn):
+    """Build a Falcon Cloud Security deep-link for a cloud asset by GCRN.
+
+    GCRN format: cid|provider|account|region|resource_type|resource_id
+    Links to the CSPM configuration summary page for the asset.
+    """
+    if not gcrn:
+        return ""
+    console    = _falcon_console_base()
+    encoded_id = gcrn.replace("|", "%7C").replace("/", "%2F")
+    return f"{console}/cloud-security/cspm/assessment/ng-configuration/{encoded_id}/summary"
 
 
 def _console_url(iom):
@@ -2544,6 +2558,10 @@ class FalconReport(FPDF):
         ]
         for idx, (field, value) in enumerate(fields):
             self.row(field, value, alt=idx % 2 == 0)
+
+        falcon_url = _fcs_asset_url(asset.get("gcrn", ""))
+        if falcon_url:
+            self.link_row("Falcon", falcon_url, alt=len(fields) % 2 == 0)
 
         self._separator()
 
