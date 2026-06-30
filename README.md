@@ -107,28 +107,6 @@ To reset to factory defaults, delete `.report_defaults.json`.
 
 ---
 
-## Cloud Service IOMs
-
-The **Cloud Service IOMs** section surfaces active Indicators of Misconfiguration across your cloud environment, filtered by service category and severity. Only `non-compliant` evaluations are included.
-
-### Categories
-
-| Category | Example resource types covered |
-|---|---|
-| `compute` | EC2 instances, volumes, images, snapshots, EIPs, Auto Scaling, GCP Compute instances and disks |
-| `networking` | Security groups, VPCs, subnets, network ACLs, route tables, load balancers, GCP networks and firewalls |
-| `iam` | AWS IAM roles, GCP IAM, AZ Users |
-| `storage` | S3 buckets, GCP Storage, Artifact Registry |
-| `database` | RDS, Athena, Glue |
-| `containers` | ECR, EKS, ECS, GKE |
-| `serverless` | Lambda, EventBridge, GCP Pub/Sub |
-| `ai` | SageMaker, Bedrock, GCP Vertex AI, Azure Machine Learning, Azure Cognitive Services |
-| `secrets` | KMS, Secrets Manager, GCP Secret Manager |
-| `account` | AWS Account, CloudFormation, CloudTrail, CloudWatch Logs, AWS Organizations |
-| `all` | All of the above |
-
-Use comma-separated values to combine categories — for example, `iam, compute` returns misconfigurations across both service groups.
-
 ### Severity filter
 
 An optional severity filter reduces results to `Critical`, `High`, `Medium`, `Low`, or any combination. Leave it as `all` to include every severity.
