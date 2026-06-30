@@ -7,9 +7,9 @@ import html
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
-from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, ContainerVulnerabilities, CloudSecurityDetections
+from falconpy import OAuth2, CloudSecurity, CloudSecurityAssets, Alerts, ContainerPackages, ContainerImages, ContainerVulnerabilities, CloudSecurityDetections, KubernetesProtection, SpotlightVulnerabilities
 from fpdf import FPDF, XPos, YPos
 
 VM_FILTERS = [
@@ -272,10 +272,22 @@ def interactive_config():
         config["iom_categories"] = []
         config["iom_severities"] = []
 
-    # ── Section 2: Cloud Apps ─────────────────────────────────────────────────
+    config["include_new_assets"] = _prompt_yn("Include New Cloud Assets", default=True)
+    if config["include_new_assets"]:
+        print(f"  {T_BOLD}{T_HEADER}▸ New Cloud Assets Filters{T_RESET}")
+        lookback_raw = _prompt("Lookback days", "7")
+        try:
+            config["new_assets_lookback_days"] = max(1, int(lookback_raw.strip()))
+        except (TypeError, ValueError):
+            config["new_assets_lookback_days"] = 7
+    else:
+        config["new_assets_lookback_days"] = 7
+    print()
+
     print(f"  {T_BOLD}{T_HEADER}▸ Section 2 — Cloud Apps{T_RESET}")
     config["include_cloud_apps"]   = _prompt_yn("Include Cloud Applications", default=True)
-    config["include_risky_images"] = _prompt_yn("Include Risky Container Images", default=True)
+    config["include_host_vulns"]   = _prompt_yn("Include Host Images (Spotlight CVEs)", default=True)
+    config["include_risky_images"] = _prompt_yn("Include Container Images", default=True)
     print()
 
     if config["include_cloud_apps"]:
@@ -285,10 +297,30 @@ def interactive_config():
             config["cloud_apps_max"] = max(1, int(ca_max_raw.strip()))
         except (ValueError, TypeError):
             config["cloud_apps_max"] = 50
+        config["include_app_sboms"] = _prompt_yn("  Include Application SBOMs (package inventory)", default=False)
         print()
 
+    if config["include_host_vulns"]:
+        print(f"  {T_BOLD}{T_HEADER}▸ Host Images Filters{T_RESET}")
+        print(f"  {T_HINT}Available severities: {', '.join(VALID_SEVERITIES)}, all{T_RESET}")
+        hv_sev_raw = _prompt("ExPRT severity (comma-separated, or all)", "Critical,High")
+        if not hv_sev_raw.strip() or hv_sev_raw.strip().lower() == "all":
+            config["host_vuln_severities"] = []
+        else:
+            sevs = [s.strip().capitalize() for s in hv_sev_raw.split(",") if s.strip()]
+            config["host_vuln_severities"] = [s for s in sevs if s in VALID_SEVERITIES] or ["Critical", "High"]
+        hv_max_raw = _prompt("Max findings to fetch", "500")
+        try:
+            config["host_vuln_max"] = max(1, int(hv_max_raw.strip()))
+        except (ValueError, TypeError):
+            config["host_vuln_max"] = 500
+    else:
+        config["host_vuln_severities"] = ["Critical", "High"]
+        config["host_vuln_max"] = 500
+    print()
+
     if config["include_risky_images"]:
-        print(f"  {T_BOLD}{T_HEADER}▸ Risky Images Filters{T_RESET}")
+        print(f"  {T_BOLD}{T_HEADER}▸ Container Images Filters{T_RESET}")
         print(f"  {T_HINT}Available severities: {', '.join(VALID_SEVERITIES)}, all{T_RESET}")
         ri_sev_raw = _prompt("CVE severity (comma-separated, or all)", "Critical")
         if not ri_sev_raw.strip() or ri_sev_raw.strip().lower() == "all":
@@ -361,12 +393,18 @@ def interactive_config():
 
 def _default_config():
     hardcoded = {
+        "include_new_assets":     True,
+        "new_assets_lookback_days": 7,
+        "include_host_vulns":     True,
+        "host_vuln_severities":   ["Critical", "High"],
+        "host_vuln_max":          500,
         "include_risks":          True,
         "include_ioas":           True,
         "include_vms":            True,
         "include_ai_packages":    False,
         "include_risky_images":   False,
         "include_cloud_apps":     False,
+        "include_app_sboms":      False,
         "include_ai_services":    False,
         "iom_categories":         [],
         "iom_severities":         [],
@@ -374,6 +412,7 @@ def _default_config():
         "risky_images_severities": ["Critical"],
         "risky_images_max":       10,
         "cloud_apps_max":         50,
+        "app_sboms_max":          50,
         "ai_services_severities": [],
         "severities":             ["High"],
         "status":                 "Open",
@@ -401,7 +440,8 @@ def _sanitize_saved_config(cfg):
     """Normalize and drop invalid values from a loaded .report_defaults.json."""
     out = {}
     bool_keys = ("include_risks", "include_ioas", "include_vms", "include_ai_packages",
-                 "include_risky_images", "include_cloud_apps", "include_ai_services")
+                 "include_risky_images", "include_cloud_apps", "include_app_sboms",
+                 "include_ai_services", "include_new_assets", "include_host_vulns")
     for k in bool_keys:
         if k in cfg:
             out[k] = bool(cfg[k])
@@ -438,8 +478,25 @@ def _sanitize_saved_config(cfg):
             out["cloud_apps_max"] = max(1, int(cfg["cloud_apps_max"]))
         except (TypeError, ValueError):
             pass
+    if "app_sboms_max" in cfg:
+        try:
+            out["app_sboms_max"] = max(1, int(cfg["app_sboms_max"]))
+        except (TypeError, ValueError):
+            pass
+    if "new_assets_lookback_days" in cfg:
+        try:
+            out["new_assets_lookback_days"] = max(1, int(cfg["new_assets_lookback_days"]))
+        except (TypeError, ValueError):
+            pass
     if "ai_services_severities" in cfg:
         out["ai_services_severities"] = [s for s in cfg["ai_services_severities"] if s in VALID_SEVERITIES]
+    if "host_vuln_severities" in cfg:
+        out["host_vuln_severities"] = [s for s in cfg["host_vuln_severities"] if s in VALID_SEVERITIES] or ["Critical", "High"]
+    if "host_vuln_max" in cfg:
+        try:
+            out["host_vuln_max"] = max(1, int(cfg["host_vuln_max"]))
+        except (TypeError, ValueError):
+            pass
     valid_vm = {"AWS", "Azure", "GCP"}
     if "vm_providers" in cfg:
         out["vm_providers"] = [p for p in cfg["vm_providers"] if p in valid_vm] or ["AWS", "Azure", "GCP"]
@@ -717,12 +774,7 @@ def _falcon_image_url(img, severities=None):
     tag      = img.get("tag", "")
     if not image_id or not digest:
         return ""
-    api_base = os.environ.get("FALCON_BASE_URL", "https://api.crowdstrike.com").rstrip("/")
-    if api_base == "https://api.crowdstrike.com":
-        console = "https://falcon.crowdstrike.com"
-    else:
-        m = re.search(r"https://api\.([^/]+)\.crowdstrike\.com", api_base)
-        console = f"https://{m.group(1)}.falcon.crowdstrike.com" if m else "https://falcon.crowdstrike.com"
+    console = _falcon_console_base()
     sevs = severities or ["Critical"]
     sev_parts = "+".join(f"severity:'{s}'" for s in sevs)
     return (
@@ -860,7 +912,31 @@ def fetch_risky_images(ci, cv, severities=None, max_images=10):
     return results
 
 
-def fetch_cloud_apps(csa, limit=50):
+def _resolve_cluster_names(kp, cluster_ids):
+    """Return {cluster_id: cluster_name} for each UUID in cluster_ids.
+
+    Uses KubernetesProtection.read_clusters_combined with batched FQL OR filters.
+    Returns empty dict on any error so callers can gracefully fall back.
+    """
+    if not cluster_ids:
+        return {}
+    result = {}
+    ids = list(cluster_ids)
+    for i in range(0, len(ids), 10):
+        batch = ids[i:i + 10]
+        fql = ",".join(f"'{cid}'" for cid in batch)
+        r = kp.read_clusters_combined(filter=f"cluster_id:[{fql}]", limit=len(batch))
+        if r["status_code"] != 200:
+            break
+        for res in r["body"].get("resources") or []:
+            cid  = res.get("cluster_id", "")
+            name = res.get("cluster_name", "")
+            if cid and name:
+                result[cid] = name
+    return result
+
+
+def fetch_cloud_apps(csa, kp=None, limit=50, include_sboms=False):
     """Fetch ASPM cloud applications via CloudSecurityAssets.
 
     Returns list of dicts sorted by total vulnerabilities desc.
@@ -889,12 +965,67 @@ def fetch_cloud_apps(csa, limit=50):
             continue
         for res in r["body"].get("resources") or []:
             cfg_raw = res.get("configuration") or "{}"
-            cfg = json.loads(cfg_raw) if isinstance(cfg_raw, str) else (cfg_raw or {})
-            deploy  = cfg.get("deployment") or {}
-            summary = cfg.get("summary") or {}
-            exprt   = summary.get("reachableVulnerabilitiesExprtRating") or {}
-            techs   = cfg.get("technologies") or []
-            k8s     = deploy.get("kubernetesDeployment") or {}
+            try:
+                cfg = json.loads(cfg_raw) if isinstance(cfg_raw, str) else (cfg_raw or {})
+            except json.JSONDecodeError:
+                continue
+            deploy   = cfg.get("deployment") or {}
+            summary  = cfg.get("summary") or {}
+            exprt    = summary.get("reachableVulnerabilitiesExprtRating") or {}
+            techs    = cfg.get("technologies") or []
+            k8s      = deploy.get("kubernetesDeployment") or {}
+            findings = cfg.get("embeddedFindings") or {}
+
+            # Build CVE → package lookup
+            cve_to_pkg = {}
+            for pkg in findings.get("vulnerable_packages") or []:
+                label = f"{pkg.get('name', '')} {pkg.get('version', '')}".strip()
+                for v in pkg.get("vulnerabilities") or []:
+                    cid = v.get("cve_id", "")
+                    if cid:
+                        cve_to_pkg[cid] = label
+
+            # Collect reachable (ExPRT-rated) CVEs
+            _sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "UNKNOWN": 4}
+            reachable_cves = []
+            for v in findings.get("vulnerabilities") or []:
+                if not v.get("reachable"):
+                    continue
+                cve_id = v.get("cve_id", "")
+                v3     = v.get("cvss_v3_score") or v.get("cvss_v2_score") or {}
+                sev    = v3.get("severity", "UNKNOWN").upper()
+                if sev not in ("CRITICAL", "HIGH"):
+                    continue
+                score  = v3.get("base_score", 0.0)
+                reachable_cves.append({
+                    "cve_id":   cve_id,
+                    "severity": sev,
+                    "score":    score,
+                    "package":  cve_to_pkg.get(cve_id, ""),
+                })
+            reachable_cves.sort(key=lambda x: (_sev_order.get(x["severity"], 4), -x["score"]))
+
+            # Fetch SBOM packages via combined_application_findings
+            gcrn = res.get("id", "")
+            sbom_packages = []
+            if include_sboms and gcrn:
+                offset, page_limit = 0, 1000
+                while True:
+                    r_pkg = csa.combined_application_findings(
+                        gcrn=gcrn, type="packages", limit=page_limit, offset=offset
+                    )
+                    if r_pkg["status_code"] != 200:
+                        dbg_response(f"combined_application_findings (packages) [{res.get('resource_name', gcrn[:40])}]", r_pkg)
+                        break
+                    pkg_resources = r_pkg["body"].get("resources") or []
+                    pkg_findings  = (pkg_resources[0].get("findings") or []) if pkg_resources else []
+                    sbom_packages.extend(pkg_findings)
+                    total_pkg = r_pkg["body"].get("meta", {}).get("pagination", {}).get("total", 0)
+                    offset += page_limit
+                    if offset >= total_pkg:
+                        break
+                sbom_packages.sort(key=lambda x: x.get("name", ""))
+
             apps.append({
                 "name":             res.get("resource_name") or res.get("resource_id", ""),
                 "account_id":       res.get("account_id", ""),
@@ -903,13 +1034,169 @@ def fetch_cloud_apps(csa, limit=50):
                 "deployment_provider": deploy.get("deploymentProvider", ""),
                 "k8s_namespace":    k8s.get("namespace", ""),
                 "k8s_deployment":   k8s.get("deploymentName", ""),
+                "k8s_cluster_id":   k8s.get("clusterId", ""),
                 "technologies":     techs,
                 "total_vulns":      summary.get("vulnerabilities", 0),
                 "exprt":            exprt,
+                "reachable_cves":   reachable_cves,
+                "packages":         sbom_packages,
+                "total_packages":   len(sbom_packages),
+                "detected":         sum(1 for p in sbom_packages if p.get("usage_level") == "Detected"),
+                "imported":         sum(1 for p in sbom_packages if p.get("usage_level") == "Imported"),
             })
 
     apps.sort(key=lambda x: x["total_vulns"], reverse=True)
+
+    if kp:
+        unique_ids = {a["k8s_cluster_id"] for a in apps if a.get("k8s_cluster_id")}
+        cluster_map = _resolve_cluster_names(kp, unique_ids)
+        for a in apps:
+            cid = a.get("k8s_cluster_id", "")
+            a["k8s_cluster_name"] = cluster_map.get(cid, "")
+    else:
+        for a in apps:
+            a["k8s_cluster_name"] = ""
+
     return apps
+
+
+def fetch_host_vulns(sv, severities=None, max_findings=500):
+    """Fetch open host vulnerabilities via SpotlightVulnerabilities.
+
+    Groups findings by host (aid). Returns list of host dicts sorted by
+    critical count desc, then high count desc.
+    """
+    sevs = severities or ["Critical", "High"]
+    sev_fql = ",".join(f"'{s.upper()}'" for s in sevs)
+    base_filter = f"status:'open'+cve.exprt_rating:[{sev_fql}]"
+
+    findings = []
+    after    = None
+    while len(findings) < max_findings:
+        params = {
+            "filter": base_filter,
+            "limit":  min(400, max_findings - len(findings)),
+            "facet":  ["cve", "host_info", "remediation"],
+        }
+        if after:
+            params["after"] = after
+        r = sv.query_vulnerabilities_combined(**params)
+        if r["status_code"] != 200:
+            dbg_response("query_vulnerabilities_combined", r)
+            break
+        batch = r["body"].get("resources") or []
+        findings.extend(batch)
+        after = r["body"].get("meta", {}).get("pagination", {}).get("after")
+        if not batch or not after:
+            break
+
+    _sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "UNKNOWN": 4}
+    hosts = {}
+    for f in findings:
+        aid = f.get("aid", "unknown")
+        hi  = f.get("host_info") or {}
+        cve = f.get("cve") or {}
+        rem = f.get("remediation") or {}
+
+        if aid not in hosts:
+            groups = [g.get("name", "") for g in (hi.get("groups") or [])]
+            hosts[aid] = {
+                "aid":              aid,
+                "hostname":         hi.get("hostname", ""),
+                "os_version":       hi.get("os_version", ""),
+                "platform":         hi.get("platform", ""),
+                "local_ip":         hi.get("local_ip", ""),
+                "internet_exposure": hi.get("internet_exposure", ""),
+                "asset_criticality": hi.get("asset_criticality", ""),
+                "groups":           groups,
+                "falcon_url":       _host_em_url(aid),
+                "cves":             [],
+                "critical_count":   0,
+                "high_count":       0,
+            }
+
+        # Derive product from apps list
+        apps = f.get("apps") or []
+        product = ""
+        if apps:
+            a = apps[0]
+            vendor  = a.get("vendor_normalized", "")
+            pname   = a.get("product_name_normalized", "") or a.get("product_name_version", "")
+            product = f"{vendor} {pname}".strip() if vendor else pname
+
+        # Remediation action
+        rem_action = ""
+        ents = rem.get("entities") or []
+        for ent in ents:
+            if ent.get("recommendation_type") == "recommended":
+                rem_action = ent.get("action", "")
+                break
+        if not rem_action and ents:
+            rem_action = ents[0].get("action", "")
+
+        sev = (cve.get("exprt_rating") or cve.get("severity") or "UNKNOWN").upper()
+        hosts[aid]["cves"].append({
+            "cve_id":   cve.get("id", f.get("vulnerability_id", "")),
+            "severity": sev,
+            "score":    cve.get("base_score", 0.0),
+            "package":  product,
+            "action":   rem_action,
+        })
+        if sev == "CRITICAL":
+            hosts[aid]["critical_count"] += 1
+        elif sev == "HIGH":
+            hosts[aid]["high_count"] += 1
+
+    for h in hosts.values():
+        h["cves"].sort(key=lambda x: (_sev_order.get(x["severity"], 4), -x["score"]))
+
+    result = sorted(
+        hosts.values(),
+        key=lambda x: (-x["critical_count"], -x["high_count"]),
+    )
+    return list(result)
+
+
+def fetch_new_assets(csa, lookback_days=7):
+    """Fetch cloud assets first seen within the last lookback_days days.
+
+    Returns list of asset dicts sorted by first_seen_timestamp desc.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ids = []
+    after = None
+    while True:
+        params = {"filter": f"first_seen:>='{cutoff}'", "limit": 500}
+        if after:
+            params["after"] = after
+        r = csa.query_assets(**params)
+        if r["status_code"] != 200:
+            dbg_response("query_assets (new assets)", r)
+            break
+        batch = r["body"].get("resources") or []
+        ids.extend(batch)
+        after = r["body"].get("meta", {}).get("pagination", {}).get("after")
+        if not batch or not after:
+            break
+
+    assets = []
+    for i in range(0, len(ids), 100):
+        r = csa.get_assets(ids=ids[i:i + 100])
+        if r["status_code"] != 200:
+            dbg_response("get_assets (new assets)", r)
+            continue
+        for res in r["body"].get("resources") or []:
+            assets.append({
+                "name":          res.get("resource_name") or res.get("resource_id", ""),
+                "resource_type": res.get("resource_type_name") or res.get("resource_type", ""),
+                "provider":      res.get("cloud_provider", ""),
+                "account_id":    res.get("account_id", ""),
+                "region":        res.get("region", ""),
+                "first_seen":    res.get("first_seen", ""),
+            })
+
+    assets.sort(key=lambda x: x["first_seen"], reverse=True)
+    return assets
 
 
 def fetch_ioms(csd, categories, severities=None):
@@ -1182,10 +1469,82 @@ def print_cloud_apps(apps):
         print(f"  {t_label('Technologies: ')} {T_VALUE}{techs}{T_RESET}")
         if app["k8s_namespace"]:
             print(f"  {t_label('Namespace:    ')} {T_MUTED}{app['k8s_namespace']}{T_RESET}")
+        if app.get("k8s_deployment"):
+            print(f"  {t_label('K8s Deploy:   ')} {T_MUTED}{app['k8s_deployment']}{T_RESET}")
+        if app.get("k8s_cluster_name"):
+            print(f"  {t_label('K8s Cluster:  ')} {T_MUTED}{app['k8s_cluster_name']}{T_RESET}")
         print(f"  {t_label('Account:      ')} {T_VALUE}{app['account_id']}{T_RESET}")
         print(f"  {t_label('Region:       ')} {T_VALUE}{app['region']}{T_RESET}")
         print(f"  {t_label('Vulns:        ')} {T_BOLD}{T_CRITICAL if app['total_vulns'] else T_MUTED}{app['total_vulns']}{T_RESET}")
         print(f"  {t_label('ExPRT:        ')} {T_WARN}{exprt_str}{T_RESET}")
+        pkgs = app.get("packages") or []
+        versioned_count = sum(1 for p in pkgs if p.get("version"))
+        if pkgs:
+            print(f"  {t_label('Packages:     ')} {T_VALUE}{len(pkgs)} total  ({versioned_count} versioned){T_RESET}")
+        cves = app.get("reachable_cves") or []
+        if cves:
+            _sev_color = {"CRITICAL": T_CRITICAL, "HIGH": T_WARN, "MEDIUM": T_WARN, "LOW": T_MUTED, "UNKNOWN": T_MUTED}
+            print(f"\n  {T_MUTED}  Reachable CVEs ({len(cves)}){T_RESET}")
+            for c in cves:
+                col = _sev_color.get(c["severity"], T_MUTED)
+                score_str = f"  ({c['score']:.1f})" if c["score"] else ""
+                pkg_str   = f"  {T_MUTED}{c['package']}{T_RESET}" if c["package"] else ""
+                print(f"  {T_MUTED}  {col}{T_BOLD}{c['severity'][:4]:<4}{T_RESET}  {T_VALUE}{c['cve_id']}{T_RESET}{score_str}{pkg_str}")
+        print(f"\n  {T_MUTED}{'─' * 62}{T_RESET}")
+    print()
+
+
+def print_new_assets(assets, lookback_days=7):
+    _banner(f"NEW CLOUD ASSETS  (last {lookback_days} days)", len(assets))
+
+    if not assets:
+        print(f"\n  {T_WARN}No new cloud assets found in the last {lookback_days} day(s).{T_RESET}\n")
+        return
+
+    for i, a in enumerate(assets, 1):
+        first_seen = a["first_seen"][:10] if len(a["first_seen"]) >= 10 else a["first_seen"] or "N/A"
+        print(f"\n  {T_BOLD}{T_VALUE}[{i} of {len(assets)}]  {a['name']}{T_RESET}")
+        print(f"  {t_label('Type:         ')} {T_VALUE}{a['resource_type'] or 'N/A'}{T_RESET}")
+        print(f"  {t_label('Provider:     ')} {T_BOLD}{T_VALUE}{a['provider'] or 'N/A'}{T_RESET}")
+        print(f"  {t_label('Account:      ')} {T_VALUE}{a['account_id'] or 'N/A'}{T_RESET}")
+        print(f"  {t_label('Region:       ')} {T_VALUE}{a['region'] or 'N/A'}{T_RESET}")
+        print(f"  {t_label('First Seen:   ')} {T_MUTED}{first_seen}{T_RESET}")
+        print(f"\n  {T_MUTED}{'─' * 62}{T_RESET}")
+    print()
+
+
+def print_host_vulns(hosts):
+    _banner("HOST IMAGES — CRITICAL / HIGH CVEs", len(hosts))
+
+    if not hosts:
+        print(f"\n  {T_WARN}No host vulnerability findings found.{T_RESET}\n")
+        return
+
+    _sev_color = {"CRITICAL": T_CRITICAL, "HIGH": T_WARN}
+    for i, h in enumerate(hosts, 1):
+        crit = h["critical_count"]
+        high = h["high_count"]
+        count_str = "  ".join(filter(None, [
+            f"{T_CRITICAL}{crit} Critical{T_RESET}" if crit else "",
+            f"{T_WARN}{high} High{T_RESET}"         if high else "",
+        ]))
+        print(f"\n  {T_BOLD}{T_VALUE}[{i} of {len(hosts)}]  {h['hostname'] or h['aid']}{T_RESET}")
+        print(f"  {t_label('OS:           ')} {T_VALUE}{h['os_version'] or 'N/A'}{T_RESET}")
+        print(f"  {t_label('IP:           ')} {T_MUTED}{h['local_ip'] or 'N/A'}{T_RESET}")
+        if h.get("asset_criticality"):
+            print(f"  {t_label('Criticality:  ')} {T_VALUE}{h['asset_criticality']}{T_RESET}")
+        if h["groups"]:
+            print(f"  {t_label('Groups:       ')} {T_MUTED}{', '.join(h['groups'])}{T_RESET}")
+        print(f"  {t_label('CVEs:         ')} {count_str}")
+        if h.get("falcon_url"):
+            print(f"  {t_label('Falcon:       ')} {T_HINT}{h['falcon_url']}{T_RESET}")
+        if h["cves"]:
+            print(f"\n  {T_MUTED}  Critical / High CVEs ({len(h['cves'])}){T_RESET}")
+            for c in h["cves"]:
+                col       = _sev_color.get(c["severity"], T_MUTED)
+                score_str = f"  ({c['score']:.1f})" if c.get("score") else ""
+                pkg_str   = f"  {T_MUTED}{c['package']}{T_RESET}" if c.get("package") else ""
+                print(f"  {T_MUTED}  {col}{T_BOLD}{c['severity'][:4]:<4}{T_RESET}  {T_VALUE}{c['cve_id']}{T_RESET}{score_str}{pkg_str}")
         print(f"\n  {T_MUTED}{'─' * 62}{T_RESET}")
     print()
 
@@ -1236,6 +1595,24 @@ def _arn_name(rid):
     return rid
 
 
+def _falcon_console_base():
+    """Derive the Falcon console base URL from FALCON_BASE_URL."""
+    api_base = os.environ.get("FALCON_BASE_URL", "https://api.crowdstrike.com").rstrip("/")
+    if api_base == "https://api.crowdstrike.com":
+        return "https://falcon.crowdstrike.com"
+    m = re.search(r"https://api\.(.+)\.crowdstrike\.com", api_base)
+    return f"https://falcon.{m.group(1)}.crowdstrike.com" if m else "https://falcon.crowdstrike.com"
+
+
+def _host_em_url(aid):
+    """Build an Exposure Management deep-link for a host by aid."""
+    if not aid:
+        return ""
+    console = _falcon_console_base()
+    encoded = quote(aid, safe="")
+    return f"{console}/exposure-management/assets/hosts/{encoded}/summary?filter=aid%3A%27{encoded}%27"
+
+
 def _falcon_iom_url(iom):
     """Build a Falcon console deep-link for the given IOM entity.
 
@@ -1249,17 +1626,7 @@ def _falcon_iom_url(iom):
     if not entity_id:
         return ""
 
-    api_base = os.environ.get("FALCON_BASE_URL", "https://api.crowdstrike.com").rstrip("/")
-    if api_base == "https://api.crowdstrike.com":
-        console = "https://falcon.crowdstrike.com"
-    else:
-        m = re.search(r"https://api\.([^/]+)\.crowdstrike\.com", api_base)
-        if m:
-            console = f"https://{m.group(1)}.falcon.crowdstrike.com"
-        else:
-            dbg(f"[_falcon_iom_url] unrecognised base URL {api_base!r}; defaulting to US-1 console")
-            console = "https://falcon.crowdstrike.com"
-
+    console = _falcon_console_base()
     parts = entity_id.split("|")
     resource_id = parts[5] if len(parts) >= 6 else ""  # segment 5 = resource_id
     rule_uuid   = parts[6] if len(parts) >= 7 else ""  # segment 6 = rule UUID
@@ -1466,6 +1833,14 @@ def _console_url(iom):
 
 def _render_toc(pdf, outline):
     W = pdf.epw
+    # fpdf2 tracks draw/fill/text colors globally. This function writes into a
+    # page buffer that was created earlier — the tracked colors may not match the
+    # stream's actual state. Force each to a distinct sentinel so every subsequent
+    # set_*_color call is guaranteed to emit a new stream command.
+    pdf.set_draw_color(0, 0, 0)
+    pdf.set_fill_color(255, 255, 255)
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_line_width(0.2)
     pdf.set_y(pdf.t_margin + 6)
 
     # Title
@@ -1478,58 +1853,73 @@ def _render_toc(pdf, outline):
     pdf.set_draw_color(*CS_RED)
     pdf.set_line_width(0.5)
     pdf.line(pdf.l_margin, pdf.get_y(), pdf.l_margin + W, pdf.get_y())
-    pdf.ln(6)
+    pdf.ln(8)
 
-    # Column headers
-    pdf.set_font("Helvetica", "B", 8)
-    pdf.set_text_color(*MID_GRAY)
-    pdf.set_x(pdf.l_margin + 3)
-    pdf.cell(W - 20, 7, "SECTION")
-    pdf.cell(20, 7, "PAGE", align="R", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    sub_idx = 0  # alternating tint counter for subsection rows
 
-    # Thin rule under column headers
-    pdf.set_draw_color(*LIGHT_GRAY)
-    pdf.set_line_width(0.3)
-    pdf.line(pdf.l_margin, pdf.get_y(), pdf.l_margin + W, pdf.get_y())
-    pdf.ln(4)
-
-    for idx, section in enumerate(outline):
+    for section in outline:
         link_id = pdf.add_link(page=section.page_number)
         name    = sanitize(section.name)
         pg_str  = str(section.page_number)
 
-        # Alternating row tint
-        if idx % 2 == 0:
-            pdf.set_fill_color(*SECTION_BG)
+        if section.level == 0:
+            # Group header row — larger font, no page number
+            if sub_idx > 0:
+                pdf.ln(3)
+            pdf.set_fill_color(*LIGHT_GRAY)
             pdf.rect(pdf.l_margin, pdf.get_y(), W, 11, "F")
-
-        # Section name (clickable)
-        pdf.set_font("Helvetica", "B", 11)
-        pdf.set_text_color(*DARK)
-        pdf.set_x(pdf.l_margin + 3)
-        pdf.cell(W - 20, 11, name, link=link_id)
-
-        # Page number (amber, right-aligned, clickable)
-        pdf.set_font("Helvetica", "B", 11)
-        pdf.set_text_color(*AMBER)
-        pdf.cell(20, 11, pg_str, align="R", link=link_id,
-                 new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-
-        pdf.ln(3)
+            pdf.set_font("Helvetica", "B", 11)
+            pdf.set_text_color(*DARK)
+            pdf.set_x(pdf.l_margin + 3)
+            pdf.cell(W, 11, name.upper(), link=link_id,
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            pdf.ln(2)
+            sub_idx = 0
+        else:
+            # Subsection row — smaller font, indented, with page number
+            if sub_idx % 2 == 0:
+                pdf.set_fill_color(*SECTION_BG)
+                pdf.rect(pdf.l_margin, pdf.get_y(), W, 9, "F")
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(*DARK)
+            pdf.set_x(pdf.l_margin + 8)
+            pdf.cell(W - 28, 9, name, link=link_id)
+            pdf.set_text_color(*AMBER)
+            pdf.cell(20, 9, pg_str, align="R", link=link_id,
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            pdf.ln(2)
+            sub_idx += 1
 
 
 class FalconReport(FPDF):
     LABEL_W = 34
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._report_time = now_utc()
 
     def header(self):
         if self.page_no() <= 2:  # Skip cover (1) and TOC (2)
             return
         self.set_fill_color(*DARK)
         self.rect(0, 0, 210, 20, "F")
+
+        # Brand name — centered across full width, return to same Y after
         self.set_font("Helvetica", "B", 9)
         self.set_text_color(*CS_RED)
-        self.set_y(6)
-        self.cell(0, 8, "CROWDSTRIKE FALCON CLOUD SECURITY", align="C")
+        self.set_xy(self.l_margin, 6)
+        self.cell(0, 8, "CROWDSTRIKE FALCON CLOUD SECURITY", align="C",
+                  new_x=XPos.LMARGIN, new_y=YPos.TOP)
+
+        # Current section — right-aligned, same row
+        section = getattr(self, "_current_section", "")
+        if section:
+            display = sanitize(section.split("  (")[0].strip())
+            self.set_font("Helvetica", "", 7)
+            self.set_text_color(*LIGHT_GRAY)
+            self.set_xy(self.l_margin, 6)
+            self.cell(0, 8, display, align="R")
+
         self.set_y(self.t_margin)
 
     def footer(self):
@@ -1537,13 +1927,23 @@ class FalconReport(FPDF):
             return
         self.set_y(-12)
         self.set_font("Helvetica", "", 7)
-        self.set_text_color(*MID_GRAY)
-        self.cell(0, 8, f"Generated {now_utc()}  |  Page {self.page_no()}", align="C")
 
-    def cover(self, risks_count=None, ioas_count=None, vm_totals=None,
-              ai_packages_count=None, ioms_count=None, ioms_label="",
-              risky_images_count=None, cloud_apps_count=None,
-              ai_services_count=None, filter_desc=""):
+        if self.page_no() > 2:
+            # TOC back-link left-aligned
+            toc_link = self.add_link(page=2)
+            self.set_font("Helvetica", "B", 8)
+            self.set_text_color(*LINK_BLUE)
+            self.cell(40, 8, "< Contents", link=toc_link)
+            # Generated / page info fills the rest, centered within it
+            self.set_font("Helvetica", "", 7)
+            self.set_text_color(*MID_GRAY)
+            self.cell(self.epw - 40, 8,
+                      f"Generated {self._report_time}  |  Page {self.page_no()}", align="C")
+        else:
+            self.set_text_color(*MID_GRAY)
+            self.cell(0, 8, f"Generated {self._report_time}  |  Page {self.page_no()}", align="C")
+
+    def cover(self, filter_desc=""):
         self.set_fill_color(*DARK)
         self.rect(0, 0, 210, 297, "F")
         self.set_y(80)
@@ -1556,78 +1956,13 @@ class FalconReport(FPDF):
         self.cell(0, 10, "Security Report", align="C",
                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-        # Add date subtitle
         self.set_font("Helvetica", "", 10)
         self.set_text_color(*LIGHT_GRAY)
         self.cell(0, 8, datetime.now(timezone.utc).strftime("%B %d, %Y"), align="C",
                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-        self.ln(8)
-
-        if risks_count is not None:
-            self.set_font("Helvetica", "B", 10)
-            self.set_text_color(*LIGHT_GRAY)
-            self.cell(0, 8, f"Cloud Risks:  {risks_count}", align="C",
-                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-            self.ln(2)
-
-        if ioas_count is not None:
-            self.set_font("Helvetica", "B", 10)
-            self.set_text_color(*LIGHT_GRAY)
-            self.cell(0, 8, f"Cloud IOA Detections:  {ioas_count}", align="C",
-                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-            self.ln(2)
-
-        if vm_totals:
-            total_vms = sum(vm_totals.values())
-            self.set_font("Helvetica", "B", 10)
-            self.set_text_color(*LIGHT_GRAY)
-            self.cell(0, 8, f"Unmanaged Virtual Machines:  {total_vms}", align="C",
-                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-            for provider, count in vm_totals.items():
-                self.set_font("Helvetica", "", 8)
-                self.set_text_color(*MID_GRAY)
-                self.cell(0, 5, f"({provider}: {count})", align="C",
-                          new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-            self.ln(2)
-
-        if ai_packages_count is not None:
-            self.set_font("Helvetica", "B", 10)
-            self.set_text_color(*LIGHT_GRAY)
-            self.cell(0, 8, f"AI Package Risks (Critical CVEs):  {ai_packages_count}", align="C",
-                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-            self.ln(2)
-
-        if ioms_count is not None:
-            self.set_font("Helvetica", "B", 10)
-            self.set_text_color(*LIGHT_GRAY)
-            label = f"Cloud Service IOMs ({ioms_label}):  {ioms_count}" if ioms_label else f"Cloud Service IOMs:  {ioms_count}"
-            self.cell(0, 8, label, align="C",
-                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-            self.ln(2)
-
-        if risky_images_count is not None:
-            self.set_font("Helvetica", "B", 10)
-            self.set_text_color(*LIGHT_GRAY)
-            self.cell(0, 8, f"Risky Images:  {risky_images_count}", align="C",
-                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-            self.ln(2)
-
-        if cloud_apps_count is not None:
-            self.set_font("Helvetica", "B", 10)
-            self.set_text_color(*LIGHT_GRAY)
-            self.cell(0, 8, f"Cloud Applications:  {cloud_apps_count}", align="C",
-                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-            self.ln(2)
-
-        if ai_services_count is not None:
-            self.set_font("Helvetica", "B", 10)
-            self.set_text_color(*LIGHT_GRAY)
-            self.cell(0, 8, f"AI Services (IOMs):  {ai_services_count}", align="C",
-                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-            self.ln(2)
 
         if filter_desc:
-            self.ln(6)
+            self.ln(10)
             self.set_font("Helvetica", "", 8)
             self.set_text_color(*MID_GRAY)
             self.cell(0, 6, sanitize(f"Filters: {filter_desc}"), align="C",
@@ -1732,6 +2067,124 @@ class FalconReport(FPDF):
         self.line(self.l_margin, self.get_y(), self.l_margin + self.epw, self.get_y())
         self.ln(8)
 
+    def _cve_table(self, cves, label="Reachable CVEs"):
+        """Compact CVE table — ExPRT | CVE ID | Score | Package."""
+        if not cves:
+            return
+        self.sub_header(f"{label}  ({len(cves)})")
+
+        _sev_color = {
+            "CRITICAL": CS_RED,
+            "HIGH":     AMBER,
+            "MEDIUM":   (170, 110, 0),
+            "LOW":      MID_GRAY,
+            "UNKNOWN":  LIGHT_GRAY,
+        }
+        SEV_W   = 20
+        CVE_W   = 42
+        SCORE_W = 14
+        PKG_W   = self.epw - SEV_W - CVE_W - SCORE_W
+
+        # Column header row
+        if self.get_y() + 6 > self.h - self.b_margin:
+            self.add_page()
+        self.set_fill_color(*LIGHT_GRAY)
+        self.set_font("Helvetica", "B", 7)
+        self.set_text_color(*MID_GRAY)
+        self.set_xy(self.l_margin, self.get_y())
+        self.cell(SEV_W,   6, "ExPRT",   fill=True)
+        self.cell(CVE_W,   6, "CVE ID",  fill=True)
+        self.cell(SCORE_W, 6, "Score",   fill=True, align="R")
+        self.cell(PKG_W,   6, "Package", fill=True,
+                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        for idx, c in enumerate(cves):
+            row_h = 6
+            if self.get_y() + row_h > self.h - self.b_margin:
+                self.add_page()
+
+            fill = SECTION_BG if idx % 2 == 0 else WHITE
+            self.set_fill_color(*fill)
+            row_y = self.get_y()
+
+            # Severity badge (colored bold text)
+            self.set_font("Helvetica", "B", 7)
+            self.set_text_color(*_sev_color.get(c["severity"], MID_GRAY))
+            self.set_xy(self.l_margin, row_y)
+            self.cell(SEV_W, row_h, c["severity"][:4], fill=True)
+
+            # CVE ID
+            self.set_font("Helvetica", "", 7)
+            self.set_text_color(*DARK)
+            self.cell(CVE_W, row_h, sanitize(c["cve_id"]), fill=True)
+
+            # CVSS score
+            score_str = f"{c['score']:.1f}" if c["score"] else ""
+            self.set_font("Helvetica", "", 7)
+            self.set_text_color(*MID_GRAY)
+            self.cell(SCORE_W, row_h, score_str, fill=True, align="R")
+
+            # Package
+            self.set_font("Helvetica", "", 7)
+            self.set_text_color(*MID_GRAY)
+            self.cell(PKG_W, row_h, sanitize(c["package"]),
+                      fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+        self.set_text_color(*DARK)
+        self.ln(2)
+
+    def _package_table(self, packages):
+        """Compact package table — Usage | Name | Version. Only renders versioned packages."""
+        versioned = [p for p in packages if p.get("version")]
+        if not versioned:
+            return
+        self.sub_header(f"Versioned Packages  ({len(versioned)})")
+
+        USAGE_W = 22
+        NAME_W  = 100
+        VER_W   = self.epw - USAGE_W - NAME_W
+
+        # Column header row
+        if self.get_y() + 6 > self.h - self.b_margin:
+            self.add_page()
+        self.set_fill_color(*LIGHT_GRAY)
+        self.set_font("Helvetica", "B", 7)
+        self.set_text_color(*MID_GRAY)
+        self.set_xy(self.l_margin, self.get_y())
+        self.cell(USAGE_W, 6, "Usage",   fill=True)
+        self.cell(NAME_W,  6, "Name",    fill=True)
+        self.cell(VER_W,   6, "Version", fill=True, align="R",
+                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+        for idx, p in enumerate(versioned):
+            row_h = 6
+            if self.get_y() + row_h > self.h - self.b_margin:
+                self.add_page()
+
+            fill = SECTION_BG if idx % 2 == 0 else WHITE
+            self.set_fill_color(*fill)
+            row_y = self.get_y()
+
+            # Usage badge
+            level = p.get("usage_level", "")
+            badge_color = AMBER if level == "Detected" else LINK_BLUE
+            self.set_font("Helvetica", "B", 7)
+            self.set_text_color(*badge_color)
+            self.set_xy(self.l_margin, row_y)
+            self.cell(USAGE_W, row_h, sanitize(level), fill=True)
+
+            # Package name
+            self.set_font("Helvetica", "", 7)
+            self.set_text_color(*DARK)
+            self.cell(NAME_W, row_h, sanitize(p.get("name", "")), fill=True)
+
+            # Version
+            self.set_text_color(*MID_GRAY)
+            self.cell(VER_W, row_h, sanitize(p.get("version", "")), fill=True,
+                      align="R", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+        self.set_text_color(*DARK)
+        self.ln(2)
+
     def risk_card(self, i, total, risk):
         if self.get_y() > self.h - self.b_margin - 80:
             self.add_page()
@@ -1827,8 +2280,12 @@ class FalconReport(FPDF):
         ]
         for idx, (field, value) in enumerate(fields):
             self.row(field, value, alt=idx % 2 == 0)
-        self.ln(3)
 
+        falcon_url = ioa.get("falcon_host_link", "")
+        if falcon_url:
+            self.link_row("Falcon", falcon_url, alt=len(fields) % 2 == 0)
+
+        self.ln(3)
         self._separator()
 
     def vm_table(self, assets):
@@ -2061,6 +2518,36 @@ class FalconReport(FPDF):
         self._separator()
 
 
+    def new_asset_card(self, i, total, asset):
+        if self.get_y() > self.h - self.b_margin - 50:
+            self.add_page()
+
+        self.set_fill_color(*DARK)
+        self.rect(self.l_margin, self.get_y(), self.epw, 10, "F")
+        self.set_font("Helvetica", "B", 9)
+        self.set_text_color(*WHITE)
+        self.set_x(self.l_margin)
+        self.cell(self.epw, 10, sanitize(f"  [{i} of {total}]  {asset['name']}"),
+                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        self.ln(1)
+
+        first_seen = asset["first_seen"]
+        if len(first_seen) >= 10:
+            first_seen = first_seen[:10]
+
+        fields = [
+            ("Resource Type", asset.get("resource_type") or "N/A"),
+            ("Provider",      asset.get("provider") or "N/A"),
+            ("Account",       asset.get("account_id") or "N/A"),
+            ("Region",        asset.get("region") or "N/A"),
+            ("First Seen",    first_seen or "N/A"),
+        ]
+        for idx, (field, value) in enumerate(fields):
+            self.row(field, value, alt=idx % 2 == 0)
+
+        self._separator()
+
+
     def cloud_app_card(self, i, total, app):
         if self.get_y() > self.h - self.b_margin - 60:
             self.add_page()
@@ -2094,10 +2581,58 @@ class FalconReport(FPDF):
         ]
         if app.get("k8s_namespace"):
             fields.insert(2, ("K8s Namespace", app["k8s_namespace"]))
+        if app.get("k8s_deployment"):
+            fields.insert(3 if app.get("k8s_namespace") else 2, ("K8s Deployment", app["k8s_deployment"]))
+        if app.get("k8s_cluster_name"):
+            insert_pos = 2 + bool(app.get("k8s_namespace")) + bool(app.get("k8s_deployment"))
+            fields.insert(insert_pos, ("K8s Cluster", app["k8s_cluster_name"]))
 
         for idx, (field, value) in enumerate(fields):
             self.row(field, value, alt=idx % 2 == 0)
 
+        self._cve_table(app.get("reachable_cves") or [])
+        self._package_table(app.get("packages") or [])
+        self._separator()
+
+
+    def host_vuln_card(self, i, total, host):
+        if self.get_y() > self.h - self.b_margin - 60:
+            self.add_page()
+
+        crit = host.get("critical_count", 0)
+        high = host.get("high_count", 0)
+        label = host.get("hostname") or host.get("aid", "Unknown Host")
+
+        self.set_fill_color(*DARK)
+        self.rect(self.l_margin, self.get_y(), self.epw, 10, "F")
+        self.set_font("Helvetica", "B", 9)
+        self.set_text_color(*WHITE)
+        self.set_x(self.l_margin)
+        self.cell(self.epw, 10, sanitize(f"  [{i} of {total}]  {label}"),
+                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        self.ln(1)
+
+        cve_summary = "  /  ".join(filter(None, [
+            f"{crit} Critical" if crit else "",
+            f"{high} High"     if high else "",
+        ])) or "None"
+
+        groups_str = ", ".join(host.get("groups") or []) or "N/A"
+        fields = [
+            ("OS Version",        host.get("os_version") or "N/A"),
+            ("Platform",          host.get("platform") or "N/A"),
+            ("Local IP",          host.get("local_ip") or "N/A"),
+            ("Internet Exposed",  host.get("internet_exposure") or "N/A"),
+            ("Asset Criticality", host.get("asset_criticality") or "N/A"),
+            ("Host Groups",       groups_str),
+            ("CVEs (Crit/High)",  cve_summary),
+        ]
+        for idx, (field, value) in enumerate(fields):
+            self.row(field, value, alt=idx % 2 == 0)
+        if host.get("falcon_url"):
+            self.link_row("Falcon", host["falcon_url"], alt=len(fields) % 2 == 0)
+
+        self._cve_table(host.get("cves") or [], label="Critical / High CVEs")
         self._separator()
 
 
@@ -2162,7 +2697,7 @@ class FalconReport(FPDF):
         self._separator()
 
 
-def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, cloud_apps, ai_services, config):
+def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, cloud_apps, ai_services, new_assets, host_vuln_hosts, config):
     output_file = ensure_timestamped_filename(config.get("output_file", OUTPUT_FILE))
     vm_totals = {provider: len(assets) for provider, assets in vm_data.items()}
     iom_cats = config.get("iom_categories", [])
@@ -2177,38 +2712,32 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, cloud_apps,
     pdf.set_auto_page_break(auto=True, margin=20)
 
     pdf.add_page()
-    pdf.cover(
-        risks_count=len(risks)               if config.get("include_risks")         else None,
-        ioas_count=len(ioas)                 if config.get("include_ioas")          else None,
-        vm_totals=vm_totals                  if config.get("include_vms")           else None,
-        ai_packages_count=len(ai_packages)   if config.get("include_ai_packages")   else None,
-        ioms_count=len(ioms)                 if iom_cats                            else None,
-        ioms_label=ioms_label                if iom_cats                            else "",
-        risky_images_count=len(risky_images) if config.get("include_risky_images")  else None,
-        cloud_apps_count=len(cloud_apps)     if config.get("include_cloud_apps")    else None,
-        ai_services_count=len(ai_services)   if config.get("include_ai_services")   else None,
-        filter_desc=fdesc,
-    )
+    pdf.cover(filter_desc=fdesc)
 
     # TOC on page 2; insert_toc_placeholder advances to page 3
     pdf.add_page()
     pdf.insert_toc_placeholder(_render_toc, pages=1)
 
-    _first_section = [True]
+    # insert_toc_placeholder already advanced the cursor to the first content page,
+    # so the very first _begin_section call must not call add_page().
+    _on_toc_page = [True]
 
     def _begin_section(title, group_label=None):
-        if _first_section[0]:
-            _first_section[0] = False
+        pdf._current_section = title
+        if _on_toc_page[0]:
+            _on_toc_page[0] = False
             if group_label:
+                pdf.start_section(group_label, level=0)
                 pdf.section_group_header(group_label)
         else:
             pdf.add_page()
             if group_label:
+                pdf.start_section(group_label, level=0)
                 pdf.section_group_header(group_label)
-        pdf.start_section(title)
+        pdf.start_section(title, level=1)
 
     # ── Section 1: Cloud Infrastructure ─────────────────────────────────────────
-    _infra_group = "Section 1  —  Cloud Infrastructure"
+    _infra_group = "Cloud Infrastructure"
     _infra_first = [True]
 
     def _infra_section(title):
@@ -2242,7 +2771,7 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, cloud_apps,
 
     if iom_cats:
         _infra_section(f"Cloud Service IOMs  ({len(ioms)} total)")
-        pdf.section_header(f"Cloud Service IOMs  ({len(ioms)} total)  -  {ioms_label}")
+        pdf.section_header(f"Cloud Service IOMs  ({len(ioms)} total)  —  {ioms_label}")
         if not ioms:
             pdf.set_font("Helvetica", "", 9)
             pdf.set_text_color(*MID_GRAY)
@@ -2252,8 +2781,21 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, cloud_apps,
             for i, iom in enumerate(ioms, 1):
                 pdf.ai_iom_card(i, len(ioms), iom)
 
+    if config.get("include_new_assets"):
+        lookback = config.get("new_assets_lookback_days", 7)
+        _infra_section(f"New Cloud Assets  ({len(new_assets)} total, last {lookback} days)")
+        pdf.section_header(f"New Cloud Assets  ({len(new_assets)} total)  -  last {lookback} days")
+        if not new_assets:
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(*MID_GRAY)
+            pdf.cell(0, 8, f"  No new cloud assets found in the last {lookback} day(s).",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        else:
+            for i, asset in enumerate(new_assets, 1):
+                pdf.new_asset_card(i, len(new_assets), asset)
+
     # ── Section 2: Cloud Apps ─────────────────────────────────────────────────
-    _apps_group = "Section 2  —  Cloud Apps"
+    _apps_group = "Cloud Applications"
     _apps_first = [True]
 
     def _apps_section(title):
@@ -2273,9 +2815,22 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, cloud_apps,
             for i, app in enumerate(cloud_apps, 1):
                 pdf.cloud_app_card(i, len(cloud_apps), app)
 
+    if config.get("include_host_vulns"):
+        hv_total_cves = sum(h["critical_count"] + h["high_count"] for h in host_vuln_hosts)
+        _apps_section(f"Host Images  ({len(host_vuln_hosts)} hosts, {hv_total_cves} CVEs)")
+        pdf.section_header(f"Host Images  —  {hv_total_cves} Critical / High CVEs across {len(host_vuln_hosts)} hosts")
+        if not host_vuln_hosts:
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(*MID_GRAY)
+            pdf.cell(0, 8, "  No critical or high host vulnerabilities found.",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        else:
+            for i, host in enumerate(host_vuln_hosts, 1):
+                pdf.host_vuln_card(i, len(host_vuln_hosts), host)
+
     if config.get("include_risky_images"):
-        _apps_section(f"Risky Container Images  ({len(risky_images)} total)")
-        pdf.section_header(f"Risky Container Images  ({len(risky_images)} total)")
+        _apps_section(f"Container Images  ({len(risky_images)} total)")
+        pdf.section_header(f"Container Images  ({len(risky_images)} total)")
         if not risky_images:
             pdf.set_font("Helvetica", "", 9)
             pdf.set_text_color(*MID_GRAY)
@@ -2286,7 +2841,7 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, cloud_apps,
                 pdf.risky_image_card(i, len(risky_images), img)
 
     # ── Section 3: Shadow AI ──────────────────────────────────────────────────
-    _ai_group = "Section 3  —  Shadow AI"
+    _ai_group = "Shadow AI"
     _ai_first = [True]
 
     def _ai_section(title):
@@ -2296,7 +2851,7 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, cloud_apps,
 
     if config.get("include_ai_services"):
         _ai_section(f"AI Services — IOMs  ({len(ai_services)} total)")
-        pdf.section_header(f"AI Services -- IOMs  ({len(ai_services)} total)")
+        pdf.section_header(f"AI Services — IOMs  ({len(ai_services)} total)")
         if not ai_services:
             pdf.set_font("Helvetica", "", 9)
             pdf.set_text_color(*MID_GRAY)
@@ -2308,7 +2863,7 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, cloud_apps,
 
     if config.get("include_ai_packages"):
         _ai_section(f"AI Package Risks  ({len(ai_packages)} packages)")
-        pdf.section_header(f"AI Package Risks -- Critical CVEs  ({len(ai_packages)} packages)")
+        pdf.section_header(f"AI Package Risks — Critical CVEs  ({len(ai_packages)} packages)")
         if not ai_packages:
             pdf.set_font("Helvetica", "", 9)
             pdf.set_text_color(*MID_GRAY)
@@ -2322,7 +2877,7 @@ def build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, cloud_apps,
     if config.get("include_vms"):
         total_vms = sum(vm_totals.values())
         _begin_section(f"Unmanaged Virtual Machines  ({total_vms} total)",
-                       group_label="Section 4  —  Unmanaged VMs")
+                       group_label="Unmanaged Hosts")
         pdf.section_header(f"Unmanaged Virtual Machines  ({total_vms} total)")
         for provider, assets in vm_data.items():
             pdf.sub_header(f"{provider}  -  {len(assets)} asset(s)")
@@ -2371,18 +2926,24 @@ if __name__ == "__main__":
     ci              = ContainerImages(auth_object=auth)
     cv              = ContainerVulnerabilities(auth_object=auth)
     csd             = CloudSecurityDetections(auth_object=auth)
+    kp              = KubernetesProtection(auth_object=auth)
+    sv              = SpotlightVulnerabilities(auth_object=auth)
+
+    print()
 
     risks = []
     if config["include_risks"]:
-        print(f"\n{T_HINT}  Fetching risks...{T_RESET}")
+        print(f"{T_HINT}  Fetching risks...{T_RESET}")
         risks = fetch_all_risks(cs, risks_filter)
-        print(f"{T_SUCCESS}  ✓ {len(risks)} risk(s) found.{T_RESET}\n")
+        print(f"{T_SUCCESS}  ✓ {len(risks)} risk(s) found.{T_RESET}")
+        print()
 
     ioas = []
     if config["include_ioas"]:
         print(f"{T_HINT}  Fetching Cloud IOAs...{T_RESET}")
         ioas = fetch_cloud_ioas(alerts, config.get("ioa_severities", []))
-        print(f"{T_SUCCESS}  ✓ {len(ioas)} Cloud IOA(s) found.{T_RESET}\n")
+        print(f"{T_SUCCESS}  ✓ {len(ioas)} Cloud IOA(s) found.{T_RESET}")
+        print()
 
     vm_data = {}
     if config["include_vms"]:
@@ -2400,32 +2961,63 @@ if __name__ == "__main__":
         print(f"{T_HINT}  Fetching AI packages  {T_MUTED}({sev_label}){T_RESET}")
         ai_packages = fetch_ai_critical_packages(cp, ci, ai_sevs)
         print(f"{T_SUCCESS}  ✓ {len(ai_packages)} AI package(s) found.{T_RESET}")
+        print()
 
     risky_images = []
     if config.get("include_risky_images"):
         ri_sevs = config.get("risky_images_severities", ["Critical"])
         ri_max  = config.get("risky_images_max", 10)
         sev_label = ", ".join(ri_sevs) if ri_sevs else "all severities"
-        print(f"{T_HINT}  Fetching risky images  {T_MUTED}({sev_label}, up to {ri_max}){T_RESET}")
+        print(f"{T_HINT}  Fetching container images  {T_MUTED}({sev_label}, up to {ri_max}){T_RESET}")
         risky_images = fetch_risky_images(ci, cv, ri_sevs, ri_max)
-        print(f"{T_SUCCESS}  ✓ {len(risky_images)} risky image(s) found.{T_RESET}")
+        print(f"{T_SUCCESS}  ✓ {len(risky_images)} container image(s) found.{T_RESET}")
+        print()
 
     cloud_apps = []
     if config.get("include_cloud_apps"):
         ca_max = config.get("cloud_apps_max", 50)
         print(f"{T_HINT}  Fetching cloud applications  {T_MUTED}(up to {ca_max}){T_RESET}")
-        cloud_apps = fetch_cloud_apps(csa, ca_max)
+        cloud_apps = fetch_cloud_apps(csa, kp=kp, limit=ca_max, include_sboms=config.get("include_app_sboms", False))
         print(f"{T_SUCCESS}  ✓ {len(cloud_apps)} cloud application(s) found.{T_RESET}")
+        print()
+
+    new_assets = []
+    if config.get("include_new_assets"):
+        lookback = config.get("new_assets_lookback_days", 7)
+        print(f"{T_HINT}  Fetching new cloud assets  {T_MUTED}(last {lookback} days){T_RESET}")
+        new_assets = fetch_new_assets(csa, lookback)
+        print(f"{T_SUCCESS}  ✓ {len(new_assets)} new asset(s) found.{T_RESET}")
+        print()
+
+    host_vuln_hosts = []
+    if config.get("include_host_vulns"):
+        hv_sevs = config.get("host_vuln_severities", ["Critical", "High"])
+        hv_max  = config.get("host_vuln_max", 500)
+        sev_label = ", ".join(hv_sevs) if hv_sevs else "all"
+        print(f"{T_HINT}  Fetching host vulnerabilities  {T_MUTED}({sev_label} ExPRT, up to {hv_max} findings){T_RESET}")
+        host_vuln_hosts = fetch_host_vulns(sv, hv_sevs, hv_max)
+        total_cves = sum(h["critical_count"] + h["high_count"] for h in host_vuln_hosts)
+        print(f"{T_SUCCESS}  ✓ {len(host_vuln_hosts)} host(s) with {total_cves} finding(s).{T_RESET}")
+        print()
 
     ioms = []
     iom_cats = config.get("iom_categories", [])
     if iom_cats:
         iom_sevs = config.get("iom_severities", [])
-        cat_label = "all categories" if "all" in iom_cats else ", ".join(iom_cats)
-        sev_label = ", ".join(iom_sevs) if iom_sevs else "all severities"
-        print(f"{T_HINT}  Fetching IOMs  {T_MUTED}({cat_label} / {sev_label}){T_RESET}")
-        ioms = fetch_ioms(csd, iom_cats, iom_sevs)
+        # When AI Services is also enabled, exclude "ai" here to avoid fetching it twice.
+        effective_cats = iom_cats
+        if config.get("include_ai_services"):
+            if "all" in effective_cats:
+                effective_cats = [c for c in IOM_CATEGORIES if c != "ai"]
+            else:
+                effective_cats = [c for c in effective_cats if c.lower() != "ai"]
+        if effective_cats:
+            cat_label = "all categories" if "all" in iom_cats else ", ".join(iom_cats)
+            sev_label = ", ".join(iom_sevs) if iom_sevs else "all severities"
+            print(f"{T_HINT}  Fetching IOMs  {T_MUTED}({cat_label} / {sev_label}){T_RESET}")
+            ioms = fetch_ioms(csd, effective_cats, iom_sevs)
         print(f"{T_SUCCESS}  ✓ {len(ioms)} misconfiguration(s) found.{T_RESET}")
+        print()
 
     ai_services = []
     if config.get("include_ai_services"):
@@ -2434,16 +3026,19 @@ if __name__ == "__main__":
         print(f"{T_HINT}  Fetching AI services IOMs  {T_MUTED}({sev_label}){T_RESET}")
         ai_services = fetch_ioms(csd, ["ai"], ai_svc_sevs)
         print(f"{T_SUCCESS}  ✓ {len(ai_services)} AI service misconfiguration(s) found.{T_RESET}")
-
-    print()
+        print()
     if config["include_ioas"]:
         print_cloud_ioas(ioas)
     if config["include_risks"]:
         print_risks(risks)
     if iom_cats:
         print_ai_ioms(ioms)
+    if config.get("include_new_assets"):
+        print_new_assets(new_assets, config.get("new_assets_lookback_days", 7))
     if config.get("include_cloud_apps"):
         print_cloud_apps(cloud_apps)
+    if config.get("include_host_vulns"):
+        print_host_vulns(host_vuln_hosts)
     if config.get("include_risky_images"):
         print_risky_images(risky_images)
     if config.get("include_ai_services"):
@@ -2454,4 +3049,4 @@ if __name__ == "__main__":
         print_vms(vm_data)
 
     print(f"\n{T_HINT}  Building PDF...{T_RESET}")
-    build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, cloud_apps, ai_services, config)
+    build_pdf(risks, ioas, vm_data, ai_packages, ioms, risky_images, cloud_apps, ai_services, new_assets, host_vuln_hosts, config)
