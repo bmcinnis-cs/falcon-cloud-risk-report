@@ -107,23 +107,6 @@ To reset to factory defaults, delete `.report_defaults.json`.
 
 ---
 
-## Non-Interactive Defaults
-
-Running without `-i` uses these defaults (or saved defaults from `.report_defaults.json`):
-
-| Setting | Default value |
-|---|---|
-| Sections | Cloud IOAs, Risks, VMs included; Cloud IOMs, Cloud Apps, Risky Images, AI Services, AI Packages excluded |
-| Risk severity | High |
-| Risk status | Open |
-| Risk cloud provider | all |
-| VM providers | AWS, Azure, GCP |
-| IOM categories | none (section skipped) |
-| IOM severity | all |
-| Output file | `falcon_cloud_security_report.pdf` |
-
----
-
 ## Cloud Service IOMs
 
 The **Cloud Service IOMs** section surfaces active Indicators of Misconfiguration across your cloud environment, filtered by service category and severity. Only `non-compliant` evaluations are included.
